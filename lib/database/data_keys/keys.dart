@@ -107,6 +107,8 @@ enum ReaderKeys {
   imageFilterQuality,
   fitToScreen,
   navigateByNumber,
+  skipReadChapters,
+  skipDuplicateChapters,
 }
 
 enum NovelReaderKeys {
