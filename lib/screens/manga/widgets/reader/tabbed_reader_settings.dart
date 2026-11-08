@@ -365,6 +365,20 @@ class _ReadingModePage extends StatelessWidget {
               onChanged: (_) => controller.toggleNavigateByNumber(),
             ),
             AnymeXTile.toggle(
+              icon: Icons.done_all_rounded,
+              title: 'Skip Read Chapters',
+              subtitle: 'Skip chapters already marked as read',
+              value: controller.skipReadChapters.value,
+              onChanged: (_) => controller.toggleSkipReadChapters(),
+            ),
+            AnymeXTile.toggle(
+              icon: Icons.filter_none_rounded,
+              title: 'Skip Duplicate Chapters',
+              subtitle: 'Skip adjacent chapters with the same number',
+              value: controller.skipDuplicateChapters.value,
+              onChanged: (_) => controller.toggleSkipDuplicateChapters(),
+            ),
+            AnymeXTile.toggle(
               icon: Icons.fullscreen_rounded,
               title: 'Fit to Screen Width',
               subtitle: 'Stretch images to fit screen width',

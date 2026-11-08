@@ -40,6 +40,9 @@ class _SettingsReaderState extends State<SettingsReader> {
   bool _mangaLongPressActions =
       ReaderKeys.longPressPageActionsEnabled.get<bool>(true);
   bool _mangaAutoWebtoon = ReaderKeys.autoWebtoonMode.get<bool>(false);
+  bool _mangaSkipReadChapters = ReaderKeys.skipReadChapters.get<bool>(false);
+  bool _mangaSkipDuplicateChapters =
+      ReaderKeys.skipDuplicateChapters.get<bool>(false);
   int _mangaFilterQuality = ReaderKeys.imageFilterQuality.get<int>(2);
 
   int _novelThemeMode = NovelReaderKeys.themeMode.get<int>(3);
@@ -502,6 +505,29 @@ class _SettingsReaderState extends State<SettingsReader> {
                               ReaderKeys.autoWebtoonMode,
                               value,
                               () => _mangaAutoWebtoon = value,
+                            ),
+                          ),
+                          AnymeXTile.toggle(
+                            icon: Icons.done_all_rounded,
+                            title: 'Skip Read Chapters',
+                            subtitle: 'Skip chapters already marked as read',
+                            value: _mangaSkipReadChapters,
+                            onChanged: (value) => _setReaderBool(
+                              ReaderKeys.skipReadChapters,
+                              value,
+                              () => _mangaSkipReadChapters = value,
+                            ),
+                          ),
+                          AnymeXTile.toggle(
+                            icon: Icons.filter_none_rounded,
+                            title: 'Skip Duplicate Chapters',
+                            subtitle:
+                                'Skip adjacent chapters with the same number',
+                            value: _mangaSkipDuplicateChapters,
+                            onChanged: (value) => _setReaderBool(
+                              ReaderKeys.skipDuplicateChapters,
+                              value,
+                              () => _mangaSkipDuplicateChapters = value,
                             ),
                           ),
                           AnymeXTile.toggle(

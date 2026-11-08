@@ -175,6 +175,8 @@ class ReaderController extends GetxController with WidgetsBindingObserver {
   final RxBool longPressPageActionsEnabled = true.obs;
   final RxBool autoWebtoonMode = false.obs;
   final RxBool navigateByNumber = false.obs;
+  final RxBool skipReadChapters = false.obs;
+  final RxBool skipDuplicateChapters = false.obs;
   final RxBool displayRefreshEnabled = false.obs;
   final RxInt displayRefreshDurationMs = 200.obs;
   final RxInt displayRefreshInterval = 1.obs;
@@ -978,6 +980,9 @@ class ReaderController extends GetxController with WidgetsBindingObserver {
         ReaderKeys.longPressPageActionsEnabled.get<bool>(true);
     autoWebtoonMode.value = ReaderKeys.autoWebtoonMode.get<bool>(false);
     navigateByNumber.value = ReaderKeys.navigateByNumber.get<bool>(false);
+    skipReadChapters.value = ReaderKeys.skipReadChapters.get<bool>(false);
+    skipDuplicateChapters.value =
+        ReaderKeys.skipDuplicateChapters.get<bool>(false);
     displayRefreshEnabled.value =
         ReaderKeys.displayRefreshEnabled.get<bool>(false);
     displayRefreshDurationMs.value =
@@ -1028,6 +1033,8 @@ class ReaderController extends GetxController with WidgetsBindingObserver {
         .set(longPressPageActionsEnabled.value);
     ReaderKeys.autoWebtoonMode.set(autoWebtoonMode.value);
     ReaderKeys.navigateByNumber.set(navigateByNumber.value);
+    ReaderKeys.skipReadChapters.set(skipReadChapters.value);
+    ReaderKeys.skipDuplicateChapters.set(skipDuplicateChapters.value);
     ReaderKeys.displayRefreshEnabled.set(displayRefreshEnabled.value);
     ReaderKeys.displayRefreshDurationMs.set(displayRefreshDurationMs.value);
     ReaderKeys.displayRefreshInterval.set(displayRefreshInterval.value);
@@ -1671,6 +1678,18 @@ class ReaderController extends GetxController with WidgetsBindingObserver {
     _syncAvailability();
   }
 
+  void toggleSkipReadChapters() {
+    skipReadChapters.value = !skipReadChapters.value;
+    savePreferences();
+    _syncAvailability();
+  }
+
+  void toggleSkipDuplicateChapters() {
+    skipDuplicateChapters.value = !skipDuplicateChapters.value;
+    savePreferences();
+    _syncAvailability();
+  }
+
   void toggleDisplayRefresh() {
     displayRefreshEnabled.value = !displayRefreshEnabled.value;
     savePreferences();
@@ -1764,40 +1783,99 @@ class ReaderController extends GetxController with WidgetsBindingObserver {
     }
   }
 
-  int getNextChapterIndex(int currentIndex) {
-    if (currentIndex == -1) return -1;
-    if (navigateByNumber.value) {
-      final current = chapterList[currentIndex];
-      final currentNum = current.number;
-      if (currentNum != null) {
-        for (int i = currentIndex + 1; i < chapterList.length; i++) {
-          if (chapterList[i].number != currentNum) {
-            return i;
-          }
-        }
-        return -1;
+  List<Chapter> _readChaptersSnapshot() {
+    final offline = offlineStorageController.getMangaById(media.id);
+    final read = offline?.readChapters;
+    if (read == null || read.isEmpty) return const [];
+    return read;
+  }
+
+  bool _isChapterMarkedRead(Chapter chapter, List<Chapter> readChapters) {
+    if (readChapters.isEmpty) return false;
+    final chapterLink = chapter.link;
+    final chapterNumber = chapter.number;
+
+    for (final read in readChapters) {
+      final readLink = read.link;
+      if (chapterLink != null &&
+          chapterLink.isNotEmpty &&
+          readLink != null &&
+          readLink.isNotEmpty &&
+          readLink == chapterLink) {
+        return true;
+      }
+      if (chapterNumber != null && read.number != null && read.number == chapterNumber) {
+        return true;
       }
     }
-    final nextIdx = currentIndex + 1;
-    return (nextIdx < chapterList.length) ? nextIdx : -1;
+    return false;
+  }
+
+  bool _shouldSkipChapter(
+    Chapter chapter, {
+    required List<Chapter> readChapters,
+    required double? currentChapterNumber,
+  }) {
+    if (skipDuplicateChapters.value &&
+        currentChapterNumber != null &&
+        chapter.number != null &&
+        chapter.number == currentChapterNumber) {
+      return true;
+    }
+    if (skipReadChapters.value && _isChapterMarkedRead(chapter, readChapters)) {
+      return true;
+    }
+    return false;
+  }
+
+  int getNextChapterIndex(int currentIndex) {
+    if (currentIndex == -1) return -1;
+    final current = chapterList[currentIndex];
+    final currentNum = current.number;
+    final readChapters = _readChaptersSnapshot();
+
+    for (int i = currentIndex + 1; i < chapterList.length; i++) {
+      final candidate = chapterList[i];
+      if (navigateByNumber.value &&
+          currentNum != null &&
+          candidate.number == currentNum) {
+        continue;
+      }
+      if (_shouldSkipChapter(
+        candidate,
+        readChapters: readChapters,
+        currentChapterNumber: currentNum,
+      )) {
+        continue;
+      }
+      return i;
+    }
+    return -1;
   }
 
   int getPrevChapterIndex(int currentIndex) {
     if (currentIndex == -1) return -1;
-    if (navigateByNumber.value) {
-      final current = chapterList[currentIndex];
-      final currentNum = current.number;
-      if (currentNum != null) {
-        for (int i = currentIndex - 1; i >= 0; i--) {
-          if (chapterList[i].number != currentNum) {
-            return i;
-          }
-        }
-        return -1;
+    final current = chapterList[currentIndex];
+    final currentNum = current.number;
+    final readChapters = _readChaptersSnapshot();
+
+    for (int i = currentIndex - 1; i >= 0; i--) {
+      final candidate = chapterList[i];
+      if (navigateByNumber.value &&
+          currentNum != null &&
+          candidate.number == currentNum) {
+        continue;
       }
+      if (_shouldSkipChapter(
+        candidate,
+        readChapters: readChapters,
+        currentChapterNumber: currentNum,
+      )) {
+        continue;
+      }
+      return i;
     }
-    final prevIdx = currentIndex - 1;
-    return (prevIdx >= 0) ? prevIdx : -1;
+    return -1;
   }
 
   void chapterNavigator(bool next) async {
