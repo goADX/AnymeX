@@ -62,6 +62,14 @@ class MediaDownloader {
 
   void close() {
     DownloadIsolatePool.instance.cancelTask(taskId);
+    if (subDownloadDir != null) {
+      try {
+        final tempDir = Directory(path.join(subDownloadDir!, 'temp_$taskId'));
+        if (tempDir.existsSync()) {
+          tempDir.deleteSync(recursive: true);
+        }
+      } catch (_) {}
+    }
   }
 
   static Future<T> _withRetryStatic<T>(
@@ -80,7 +88,8 @@ class MediaDownloader {
             e,
           );
         }
-        await Future.delayed(Duration(milliseconds: 500 * (1 << (attempts - 1))));
+        await Future.delayed(
+            Duration(milliseconds: 500 * (1 << (attempts - 1))));
       }
     }
   }
@@ -113,21 +122,24 @@ class MediaDownloader {
         final subFolder =
             path.join(subDownloadDir!, 'Episode_${episodeNumber}_subs');
         final ext = getSubtitleExtension(element.file!);
-        final subtitleFile = File(
-          path.join(subFolder, '${element.label}$ext'),
-        );
-        if (subtitleFile.existsSync()) {
+        final safeName = sanitizePathSegment('${element.label}$ext');
+        final subtitleFile = File(path.join(subFolder, safeName));
+        if (subtitleFile.existsSync() && subtitleFile.lengthSync() > 0) {
           continue;
         }
-        subtitleFile.createSync(recursive: true);
-        final response = await _withRetryStatic(
-          () => httpClient.get(Uri.parse(element.file!), headers: headers ?? {}),
-          3,
-        );
-        if (response.statusCode != 200) {
-          continue;
-        }
-        await subtitleFile.writeAsBytes(response.bodyBytes);
+        try {
+          final response = await _withRetryStatic(
+            () => httpClient.get(Uri.parse(element.file!),
+                headers: headers ?? {}),
+            3,
+          );
+          if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
+            if (!subtitleFile.parent.existsSync()) {
+              subtitleFile.parent.createSync(recursive: true);
+            }
+            await subtitleFile.writeAsBytes(response.bodyBytes);
+          }
+        } catch (_) {}
       }
     } catch (e) {
       throw MediaDownloaderException('Download failed', e);
@@ -238,6 +250,15 @@ class MediaDownloader {
         }
       },
       onError: (error) {
+        if (subDownloadDir != null) {
+          try {
+            final tempDir =
+                Directory(path.join(subDownloadDir!, 'temp_$taskId'));
+            if (tempDir.existsSync()) {
+              tempDir.deleteSync(recursive: true);
+            }
+          } catch (_) {}
+        }
         if (!completer.isCompleted) completer.completeError(error);
       },
     );
@@ -455,8 +476,13 @@ class MediaDownloader {
     return 'Episode $episodeNumber$ext';
   }
 
-  static String sanitizePathSegment(String input) =>
-      input.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_').trim();
+  static String sanitizePathSegment(String input) {
+    final sanitized = input
+        .replaceAll(RegExp(r'[<>:"/\\|?*]'), '_')
+        .replaceAll(RegExp(r'\.+$'), '')
+        .trim();
+    return sanitized.isEmpty ? 'unknown' : sanitized;
+  }
 
   static String buildTaskId({
     required String extensionName,

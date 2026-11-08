@@ -40,9 +40,10 @@ class DownloadProgress {
   final PageUrl? pageUrl;
   final TsInfo? segment;
   final bool isCompleted;
+  final int? bytes;
 
   DownloadProgress(this.completed, this.total, this.itemType,
-      {this.pageUrl, this.segment, this.isCompleted = false});
+      {this.pageUrl, this.segment, this.isCompleted = false, this.bytes});
 }
 
 class DownloadComplete {}
@@ -54,6 +55,8 @@ class DownloadIsolatePool {
   final List<_PoolWorker> _workers = [];
   final Queue<_DownloadTask> _taskQueue = Queue();
   final Set<int> _availableWorkers = {};
+  final Map<String, ReceivePort> _activeTaskReceivePorts = {};
+  final Map<String, void Function(Exception)> _activeTaskErrorCallbacks = {};
   final int poolSize;
   bool _initialized = false;
 
@@ -97,6 +100,9 @@ class DownloadIsolatePool {
     downloadTaskCancellation[taskId] = false;
 
     final receivePort = ReceivePort();
+    _activeTaskReceivePorts[taskId] = receivePort;
+    _activeTaskErrorCallbacks[taskId] = onError;
+
     final task = _DownloadTask(
       taskId: taskId,
       type: _TaskType.fileDownload,
@@ -111,6 +117,8 @@ class DownloadIsolatePool {
 
     receivePort.listen((message) {
       if (downloadTaskCancellation[taskId] == true) {
+        _activeTaskReceivePorts.remove(taskId);
+        _activeTaskErrorCallbacks.remove(taskId);
         receivePort.close();
         return;
       }
@@ -118,10 +126,14 @@ class DownloadIsolatePool {
       if (message is DownloadProgress) {
         onProgress(message);
       } else if (message is DownloadComplete) {
+        _activeTaskReceivePorts.remove(taskId);
+        _activeTaskErrorCallbacks.remove(taskId);
         downloadTaskCancellation.remove(taskId);
         receivePort.close();
         onComplete();
       } else if (message is Exception) {
+        _activeTaskReceivePorts.remove(taskId);
+        _activeTaskErrorCallbacks.remove(taskId);
         downloadTaskCancellation.remove(taskId);
         receivePort.close();
         onError(message);
@@ -150,6 +162,9 @@ class DownloadIsolatePool {
     downloadTaskCancellation[taskId] = false;
 
     final receivePort = ReceivePort();
+    _activeTaskReceivePorts[taskId] = receivePort;
+    _activeTaskErrorCallbacks[taskId] = onError;
+
     final task = _DownloadTask(
       taskId: taskId,
       type: _TaskType.m3u8Download,
@@ -169,6 +184,8 @@ class DownloadIsolatePool {
 
     receivePort.listen((message) {
       if (downloadTaskCancellation[taskId] == true) {
+        _activeTaskReceivePorts.remove(taskId);
+        _activeTaskErrorCallbacks.remove(taskId);
         receivePort.close();
         return;
       }
@@ -176,10 +193,14 @@ class DownloadIsolatePool {
       if (message is DownloadProgress) {
         onProgress(message);
       } else if (message is DownloadComplete) {
+        _activeTaskReceivePorts.remove(taskId);
+        _activeTaskErrorCallbacks.remove(taskId);
         downloadTaskCancellation.remove(taskId);
         receivePort.close();
         onComplete();
       } else if (message is Exception) {
+        _activeTaskReceivePorts.remove(taskId);
+        _activeTaskErrorCallbacks.remove(taskId);
         downloadTaskCancellation.remove(taskId);
         receivePort.close();
         onError(message);
@@ -191,6 +212,26 @@ class DownloadIsolatePool {
 
   void cancelTask(String taskId) {
     downloadTaskCancellation[taskId] = true;
+    _taskQueue.removeWhere((t) => t.taskId == taskId);
+
+    final errorCallback = _activeTaskErrorCallbacks.remove(taskId);
+    errorCallback?.call(DownloadPoolException('Task cancelled: $taskId'));
+
+    final receivePort = _activeTaskReceivePorts.remove(taskId);
+    try {
+      receivePort?.close();
+    } catch (_) {}
+
+    for (final worker in _workers) {
+      if (worker.currentTaskId == taskId) {
+        worker.cancelCurrentTask().then((_) {
+          if (!_availableWorkers.contains(worker.id)) {
+            _availableWorkers.add(worker.id);
+          }
+          _processQueue();
+        });
+      }
+    }
   }
 
   void _enqueueTask(_DownloadTask task) {
@@ -223,6 +264,8 @@ class DownloadIsolatePool {
     _workers.clear();
     _taskQueue.clear();
     _availableWorkers.clear();
+    _activeTaskReceivePorts.clear();
+    _activeTaskErrorCallbacks.clear();
     downloadTaskCancellation.clear();
     _initialized = false;
   }
@@ -287,7 +330,10 @@ class _PoolWorker {
   late Isolate _isolate;
   late SendPort _sendPort;
   late ReceivePort _receivePort;
-  final Completer<void> _ready = Completer();
+  bool _isReady = false;
+  String? currentTaskId;
+  Completer<void>? _taskCompleter;
+  ReceivePort? _currentTaskPort;
 
   _PoolWorker._(this.id);
 
@@ -298,6 +344,7 @@ class _PoolWorker {
   }
 
   Future<void> _spawn() async {
+    _isReady = false;
     _receivePort = ReceivePort();
 
     _isolate = await Isolate.spawn(
@@ -313,22 +360,30 @@ class _PoolWorker {
     });
 
     _sendPort = await completer.future;
-    _ready.complete();
+    _isReady = true;
   }
 
   Future<void> executeTask(_DownloadTask task) async {
-    await _ready.future;
+    while (!_isReady) {
+      await Future.delayed(const Duration(milliseconds: 10));
+    }
 
+    currentTaskId = task.taskId;
     final completer = Completer<void>();
+    _taskCompleter = completer;
 
     final taskPort = ReceivePort();
+    _currentTaskPort = taskPort;
 
     taskPort.listen((message) {
       task.sendPort.send(message);
 
       if (message is DownloadComplete || message is Exception) {
         taskPort.close();
-        completer.complete();
+        _currentTaskPort = null;
+        currentTaskId = null;
+        _taskCompleter = null;
+        if (!completer.isCompleted) completer.complete();
       }
     });
 
@@ -344,9 +399,43 @@ class _PoolWorker {
     return completer.future;
   }
 
+  Future<void> cancelCurrentTask() async {
+    if (currentTaskId == null) return;
+    currentTaskId = null;
+
+    try {
+      _currentTaskPort?.close();
+      _currentTaskPort = null;
+    } catch (_) {}
+
+    if (_taskCompleter != null && !_taskCompleter!.isCompleted) {
+      _taskCompleter!.complete();
+      _taskCompleter = null;
+    }
+
+    try {
+      _isolate.kill(priority: Isolate.immediate);
+    } catch (_) {}
+
+    try {
+      _receivePort.close();
+    } catch (_) {}
+
+    await _spawn();
+  }
+
   void dispose() {
-    _isolate.kill();
-    _receivePort.close();
+    currentTaskId = null;
+    try {
+      _currentTaskPort?.close();
+      _currentTaskPort = null;
+    } catch (_) {}
+    try {
+      _isolate.kill(priority: Isolate.immediate);
+    } catch (_) {}
+    try {
+      _receivePort.close();
+    } catch (_) {}
   }
 }
 
@@ -408,6 +497,7 @@ Future<void> _processFileDownload(
   http.Client client,
 ) async {
   int completed = 0;
+  int totalBytes = 0;
   final total = params.pageUrls.length;
   final queue = Queue<PageUrl>.from(params.pageUrls);
   final List<PageUrl> failedPages = [];
@@ -443,15 +533,17 @@ Future<void> _processFileDownload(
             params.itemType,
             replyPort,
             taskId: params.taskId,
-          ).then((_) {
+          ).then((bytes) {
             if (params.itemType != ItemType.anime) {
               completed++;
+              totalBytes += bytes;
               replyPort.send(
                 DownloadProgress(
                   completed,
                   total,
                   params.itemType,
                   pageUrl: pageUrl,
+                  bytes: totalBytes,
                 ),
               );
             }
@@ -487,7 +579,7 @@ Future<void> _processFileDownload(
   }
 }
 
-Future<void> _downloadFile(
+Future<int> _downloadFile(
   PageUrl pageUrl,
   http.Client client,
   ItemType itemType,
@@ -522,7 +614,9 @@ Future<void> _downloadFile(
       final file = File(pageUrl.fileName!);
       await file.parent.create(recursive: true);
       await file.writeAsBytes(response.bodyBytes);
+      return response.bodyBytes.length;
     } else {
+      int received = 0;
       await _withRetry((_) async {
         if (taskId != null && downloadTaskCancellation[taskId] == true) {
           throw DownloadPoolException('Cancelled');
@@ -536,7 +630,7 @@ Future<void> _downloadFile(
           );
         }
         int total = response.contentLength ?? 0;
-        int received = 0;
+        received = 0;
 
         final file = File(pageUrl.fileName!);
         await file.parent.create(recursive: true);
@@ -557,6 +651,7 @@ Future<void> _downloadFile(
                   total,
                   itemType,
                   pageUrl: pageUrl,
+                  bytes: received,
                 ),
               );
             } catch (_) {}
@@ -566,6 +661,7 @@ Future<void> _downloadFile(
           await sink.close();
         }
       }, 3);
+      return received;
     }
   } catch (e) {
     throw DownloadPoolException(
@@ -581,6 +677,7 @@ Future<void> _processM3u8Download(
   http.Client client,
 ) async {
   int completed = 0;
+  int totalBytes = 0;
   final total = params.segments.length;
   final Queue<TsInfo> queue = Queue<TsInfo>.from(params.segments);
   final List<TsInfo> failedSegments = [];
@@ -608,14 +705,16 @@ Future<void> _processM3u8Download(
         while (queue.isNotEmpty && activeTasks.length < params.concurrentDownloads) {
           if (downloadTaskCancellation[params.taskId] == true) break;
           final segment = queue.removeFirst();
-          final task = _downloadSegment(segment, params, client).then((_) {
+          final task = _downloadSegment(segment, params, client).then((bytes) {
             completed++;
+            totalBytes += bytes;
             replyPort.send(
               DownloadProgress(
                 completed,
                 total,
                 params.itemType,
                 segment: segment,
+                bytes: totalBytes,
               ),
             );
           }).catchError((error) {
@@ -650,7 +749,7 @@ Future<void> _processM3u8Download(
   }
 }
 
-Future<void> _downloadSegment(
+Future<int> _downloadSegment(
   TsInfo ts,
   M3u8DownloadParams params,
   http.Client client,
@@ -664,7 +763,7 @@ Future<void> _downloadSegment(
       if (kDebugMode) {
         print('[DownloadIsolate] Skipped ${ts.name} (already downloaded)');
       }
-      return;
+      return file.lengthSync();
     }
     await file.parent.create(recursive: true);
 
@@ -714,6 +813,7 @@ Future<void> _downloadSegment(
     if (kDebugMode) {
       print('[DownloadIsolate] Successfully downloaded ${ts.name}');
     }
+    return file.existsSync() ? file.lengthSync() : 0;
   } catch (e) {
     if (kDebugMode) {
       print('[DownloadIsolate] Error downloading segment ${ts.name}: $e');

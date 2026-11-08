@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:anymex/models/Media/media.dart';
 import 'package:anymex/screens/anime/widgets/wrongtitle_modal.dart';
 import 'package:anymex/screens/extensions/ExtensionSettings/ExtensionSettings.dart';
@@ -57,8 +56,7 @@ class UnifiedSourceSection extends StatelessWidget {
           isManga: !isNovel && isManga,
           onSourceSelected: onSourceSelected,
           onSubSourceSelected: onSubSourceSelected,
-          onCloudflareBypass: !Platform.isLinux &&
-                  (activeSource.baseUrl?.isNotEmpty ?? false)
+          onCloudflareBypass: (activeSource.baseUrl?.isNotEmpty ?? false)
               ? () => context.openCloudflareBypass(activeSource.baseUrl!)
               : null,
           onPreferencesTap: () => _openSourcePreferences(context),
@@ -77,10 +75,13 @@ class UnifiedSourceSection extends StatelessWidget {
           child: Row(
             children: [
               Expanded(
-                child: AnymeXText(searchedTitle,
+                child: AnymeXText(
+                  searchedTitle,
                   variant: TextVariant.semiBold,
                   size: 13,
-                  color: searchedTitle.contains('No Match Found')
+                  color: searchedTitle.contains('No Match Found') ||
+                          searchedTitle.contains('Error') ||
+                          searchedTitle.contains('Failed')
                       ? colors.error
                       : colors.primary,
                   maxLines: 1,
@@ -119,7 +120,8 @@ class UnifiedSourceSection extends StatelessWidget {
                         color: colors.primary,
                       ),
                       const SizedBox(width: 6),
-                      AnymeXText("Wrong Title?",
+                      AnymeXText(
+                        "Wrong Title?",
                         size: 11,
                         color: colors.primary,
                         variant: TextVariant.bold,

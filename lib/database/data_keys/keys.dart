@@ -35,6 +35,10 @@ enum General {
   joinDialogShowCount,
   wrongTitleIsCardView,
   showHomeContinueWatching,
+  incognitoMode,
+  dontShowDonationDialog,
+  hasShownHomeDonationDialog,
+  watchedAdsCount,
 }
 
 enum ThemeKeys {
@@ -69,6 +73,7 @@ enum PlayerUiKeys {
   selectedProfile,
   shadersEnabled,
   cacheDays,
+  useMpvConf,
 }
 
 enum ReaderKeys {
@@ -305,6 +310,16 @@ enum UISettingsKeys {
   appFontFamily,
   bottomNavBarMargin,
   useLegacyNavbar,
+  useComputedBlur,
+  fullScreenBlur,
+  tintBlur,
+  usePosterForBlur,
+  detailsBlurAmount,
+  detailsBackdropBrightness,
+  detailsFadeAdjuster,
+  detailsBlurStyle,
+  detailsBlurScope,
+  customCardStyleJson,
 }
 
 enum DownloadKeys {
@@ -328,3 +343,19 @@ enum DiscordRpcKeys {
   novelDetailsFormat,
   idleFormat,
 }
+
+enum CommentKeys {
+  renderAvatarDecorations,
+  renderNameplates,
+  renderProfileEffects,
+  renderBanners,
+}
+
+enum NetworkKeys {
+  customDnsUrl,
+  proxyUrl,
+  verifyTls,
+  customUserAgent,
+  fetchedUserAgent,
+}
+

@@ -6,7 +6,12 @@ import 'package:anymex/screens/extensions/ExtensionScreen.dart';
 import 'package:anymex/controllers/source/source_controller.dart';
 import 'package:anymex/screens/local_source/local_source_view.dart';
 import 'package:anymex/screens/profile/profile_page.dart';
+import 'package:anymex/screens/notifications/notification_screen.dart';
+import 'package:anymex/screens/notifications/notification_controller.dart';
+import 'package:anymex/controllers/settings/settings.dart';
 import 'package:anymex/screens/settings/settings.dart';
+import 'package:anymex/controllers/services/anilist/anilist_auth.dart';
+import 'package:anymex/services/commentum_service.dart';
 import 'package:anymex/utils/function.dart';
 import 'package:anymex/utils/theme_extensions.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_badge.dart';
@@ -335,16 +340,74 @@ class SettingsSheet extends StatelessWidget {
             ),
           ),
           AnymexOnTap(
-            onTap: () => snackBar('This feature is not available yet.'),
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: theme.surfaceContainerHighest.opaque(0.5),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(Iconsax.notification,
-                  size: 18, color: theme.onSurface.opaque(0.7)),
-            ),
+            onTap: () {
+              Navigator.pop(context);
+              if (!Get.isRegistered<NotificationController>()) {
+                Get.put(NotificationController());
+              } else {
+                final controller = Get.find<NotificationController>();
+                if (controller.anilistNotifications.isEmpty) {
+                  controller.loadAnilistNotifications();
+                }
+              }
+              Get.to(() => const NotificationScreen());
+            },
+            child: Obx(() {
+              int unread = 0;
+              if (Get.isRegistered<AnilistAuth>()) {
+                unread += Get.find<AnilistAuth>().unreadAnilistCount.value;
+              }
+              if (Get.isRegistered<CommentumService>()) {
+                unread +=
+                    Get.find<CommentumService>().unreadNotificationCount.value;
+              }
+              return Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: theme.surfaceContainerHighest.opaque(0.5),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(Iconsax.notification,
+                        size: 18, color: theme.onSurface.opaque(0.7)),
+                  ),
+                  if (unread > 0)
+                    Positioned(
+                      right: -4,
+                      top: -4,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: theme.error,
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: [
+                            BoxShadow(
+                              color: theme.error.withOpacity(0.4),
+                              blurRadius: 4,
+                              spreadRadius: 1,
+                            ),
+                          ],
+                        ),
+                        constraints:
+                            const BoxConstraints(minWidth: 16, minHeight: 16),
+                        child: Text(
+                          unread > 99 ? '99+' : '$unread',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                            height: 1.2,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            }),
           ),
         ],
       ),
@@ -398,14 +461,30 @@ class SettingsSheet extends StatelessWidget {
           navigate(() => const WatchOffline());
         },
       ),
-      // _SheetMenuItem(
-      //   icon: Icons.people_rounded,
-      //   label: 'Watch Together',
-      //   onTap: () {
-      //     Get.back();
-      //     navigate(() => const WatchiumPage());
-      //   },
-      // ),
+      _SheetMenuItem(
+        icon: Icons.people_rounded,
+        label: 'Watch Together',
+        onTap: () {
+          Get.back();
+          navigate(() => const WatchiumPage());
+        },
+      ),
+      _SheetMenuItem(
+        icon: settingsController.isIncognito.value
+            ? Iconsax.eye_slash
+            : Iconsax.eye,
+        label: settingsController.isIncognito.value
+            ? 'Incognito (Active)'
+            : 'Incognito Mode',
+        onTap: () {
+          settingsController.toggleIncognito();
+          snackBar(
+            settingsController.isIncognito.value
+                ? 'Incognito mode enabled. History & sync paused.'
+                : 'Incognito mode disabled.',
+          );
+        },
+      ),
       _SheetMenuItem(
         icon: Iconsax.setting,
         label: 'Settings',

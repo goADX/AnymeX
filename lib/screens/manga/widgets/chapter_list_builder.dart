@@ -12,7 +12,7 @@ import 'package:anymex/screens/manga/widgets/scanlators_ranges.dart';
 import 'package:anymex/screens/novel/reader/novel_reader.dart';
 import 'package:anymex/utils/function.dart';
 import 'package:anymex/utils/theme_extensions.dart';
-import 'package:anymex/widgets/animation/animations.dart';
+import 'package:anymex/widgets/animation/widget_animations.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_button.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_progress.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
@@ -41,7 +41,6 @@ typedef _BatchOption = ({
   VoidCallback onTap,
 });
 
-
 class _ChapterTileData {
   final double progressValue;
   final int progressPercentage;
@@ -66,9 +65,12 @@ _ChapterTileData _computeTileData({
   final readChaptersList = savedMedia?.readChapters ?? <Chapter>[];
   Chapter? savedChap;
   if (chapter.link != null && chapter.link!.isNotEmpty) {
-    savedChap = readChaptersList.firstWhereOrNull((c) => c.link == chapter.link);
+    savedChap =
+        readChaptersList.firstWhereOrNull((c) => c.link == chapter.link);
   }
-  savedChap ??= readChaptersList.firstWhereOrNull((c) => c.number == chapter.number) ?? chapter;
+  savedChap ??=
+      readChaptersList.firstWhereOrNull((c) => c.number == chapter.number) ??
+          chapter;
 
   final totalPages = savedChap.totalPages ?? 0;
   final currentPage = savedChap.pageNumber ?? 0;
@@ -91,10 +93,9 @@ _ChapterTileData _computeTileData({
 
   final bool isRead;
   if (isLoggedInOnline) {
-    isRead =
-        (chapter.number != null && chapter.number! <= onlineProgress) ||
-            isPageComplete ||
-            isReadInHistory;
+    isRead = (chapter.number != null && chapter.number! <= onlineProgress) ||
+        isPageComplete ||
+        isReadInHistory;
   } else {
     isRead = isPageComplete || isReadInHistory;
   }
@@ -103,9 +104,11 @@ _ChapterTileData _computeTileData({
   Chapter? continueChapter;
   if (lastRead != null) {
     if (lastRead.link != null && lastRead.link!.isNotEmpty) {
-      continueChapter = allChapters.firstWhereOrNull((c) => c.link == lastRead.link);
+      continueChapter =
+          allChapters.firstWhereOrNull((c) => c.link == lastRead.link);
     }
-    continueChapter ??= allChapters.firstWhereOrNull((c) => c.number == lastRead.number);
+    continueChapter ??=
+        allChapters.firstWhereOrNull((c) => c.number == lastRead.number);
   }
   continueChapter ??= allChapters.isNotEmpty ? allChapters.first : null;
 
@@ -144,7 +147,10 @@ class ChapterListBuilder extends StatefulWidget {
   State<ChapterListBuilder> createState() => _ChapterListBuilderState();
 }
 
-class _ChapterListBuilderState extends State<ChapterListBuilder> {
+class _ChapterListBuilderState extends State<ChapterListBuilder>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
   final RxInt selectedChunkIndex = 0.obs;
   final RxInt selectedViewTab = 0.obs;
   late final RxInt selectedScanlatorIndex;
@@ -157,6 +163,12 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
   int _onlineProgress = 0;
   bool _isLoggedInOnline = false;
   VoidCallback? _offlineStorageListener;
+  Worker? _scanlatorWorker;
+
+  List<String> _cachedScanlatorsList = const [];
+  List<Chapter> _cachedFilteredChapters = const [];
+  List<List<Chapter>> _cachedChunks = const [];
+  int _cachedScanIndex = -1;
 
   @override
   void initState() {
@@ -175,6 +187,10 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
       _downloadController.ensureMangaMetaLoaded(extName, mediaTitle);
     }
     _resolveComputedState();
+    _scanlatorWorker = ever(selectedScanlatorIndex, (_) {
+      _recomputeFilteredAndChunks();
+      if (mounted) setState(() {});
+    });
     _offlineStorageListener = () {
       _resolveComputedState();
       if (mounted) setState(() {});
@@ -184,6 +200,7 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
 
   @override
   void dispose() {
+    _scanlatorWorker?.dispose();
     if (_offlineStorageListener != null) {
       _offlineStorage.removeListener(_offlineStorageListener!);
     }
@@ -210,11 +227,32 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
     if (_isLoggedInOnline && widget.anilistData != null) {
       final item = _auth.onlineService.mangaList
           .firstWhereOrNull((e) => e.id == widget.anilistData!.id);
-      _onlineProgress =
-          double.tryParse(item?.episodeCount ?? '')?.toInt() ?? 0;
+      _onlineProgress = double.tryParse(item?.episodeCount ?? '')?.toInt() ?? 0;
     } else {
       _onlineProgress = 0;
     }
+
+    final Set<String> scanlatorsSet = {};
+    for (final ch in widget.chapterList) {
+      if (ch.scanlator?.isNotEmpty == true) {
+        scanlatorsSet.add(ch.scanlator!);
+      }
+    }
+    _cachedScanlatorsList = scanlatorsSet.toList();
+    _recomputeFilteredAndChunks();
+  }
+
+  void _recomputeFilteredAndChunks() {
+    final scanIndex = selectedScanlatorIndex.value;
+    _cachedScanIndex = scanIndex;
+    _cachedFilteredChapters = (scanIndex == 0 || _cachedScanlatorsList.isEmpty)
+        ? widget.chapterList
+        : widget.chapterList
+            .where((c) => c.scanlator == _cachedScanlatorsList[scanIndex - 1])
+            .toList();
+
+    final chunkSize = calculateChapterChunkSize(_cachedFilteredChapters);
+    _cachedChunks = chunkChapter(_cachedFilteredChapters, chunkSize);
   }
 
   void _onTap(Chapter chapter) async {
@@ -236,8 +274,9 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
       if (mounted) setState(() {});
     } else {
       final mediaData = widget.anilistData!;
-      final dbId = '${mediaData.id}_${mediaData.serviceType.name}_${mediaData.type}';
-      
+      final dbId =
+          '${mediaData.id}_${mediaData.serviceType.name}_${mediaData.type}';
+
       bool shouldTrackValue = false;
       final isLoggedInOnline = _auth.isLoggedIn.value &&
           _auth.serviceType.value != ServicesType.extensions;
@@ -262,19 +301,9 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
         }
       }
 
-      final Set<String> scanlatorsSet = {};
-      for (final ch in widget.chapterList) {
-        if (ch.scanlator?.isNotEmpty == true) {
-          scanlatorsSet.add(ch.scanlator!);
-        }
-      }
-      final scanlatorsList = scanlatorsSet.toList();
-      final scanIndex = selectedScanlatorIndex.value;
-      final filteredChapters = (scanIndex == 0 || scanlatorsList.isEmpty)
-          ? widget.chapterList
-          : widget.chapterList
-              .where((c) => c.scanlator == scanlatorsList[scanIndex - 1])
-              .toList();
+      final filteredChapters = _cachedFilteredChapters.isNotEmpty
+          ? _cachedFilteredChapters
+          : widget.chapterList;
 
       await navigate(() => ReadingPage(
             anilistData: mediaData,
@@ -289,6 +318,7 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     if (widget.chapterList.isEmpty) {
       return const SliverToBoxAdapter(
         child: Center(
@@ -300,15 +330,12 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
       );
     }
 
-    final Set<String> scanlatorsSet = {};
-    for (final ch in widget.chapterList) {
-      if (ch.scanlator?.isNotEmpty == true) {
-        scanlatorsSet.add(ch.scanlator!);
-      }
-    }
-    final scanlatorsList = scanlatorsSet.toList();
+    final scanlatorsList = _cachedScanlatorsList;
 
     return Obx(() {
+      if (_cachedScanIndex != selectedScanlatorIndex.value) {
+        _recomputeFilteredAndChunks();
+      }
       final isNovel = widget.anilistData?.mediaType == ItemType.novel;
       final extName = (isNovel
               ? _sourceController.activeNovelSource.value?.name
@@ -319,15 +346,8 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
           _downloadController.getDownloadedChapters(extName, mediaTitle);
       final isDownloadedTab = selectedViewTab.value == 1;
 
-      final scanIndex = selectedScanlatorIndex.value;
-      final filtered = (scanIndex == 0 || scanlatorsList.isEmpty)
-          ? widget.chapterList
-          : widget.chapterList
-              .where((c) => c.scanlator == scanlatorsList[scanIndex - 1])
-              .toList();
-
-      final chunkSize = calculateChapterChunkSize(filtered);
-      final chunks = chunkChapter(filtered, chunkSize);
+      final filtered = _cachedFilteredChapters;
+      final chunks = _cachedChunks;
       final validChunkIndex = selectedChunkIndex.value
           .clamp(0, chunks.isEmpty ? 0 : chunks.length - 1);
       final currentChapters =
@@ -529,6 +549,7 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
                   final chMeta = downloadedChapters[index];
                   return _buildTile(
                     context,
+                    index,
                     chMeta.chapter,
                     settings,
                     customOnTap: () =>
@@ -554,6 +575,7 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
                   final chMeta = downloadedChapters[index];
                   return _buildTile(
                     context,
+                    index,
                     chMeta.chapter,
                     settings,
                     customOnTap: () =>
@@ -583,6 +605,7 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
                 final chapter = currentChapters[index];
                 return _buildTile(
                   context,
+                  index,
                   chapter,
                   settings,
                   downloadButton: _buildChapterDownloadButton(
@@ -602,6 +625,7 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
                 final chapter = currentChapters[index];
                 return _buildTile(
                   context,
+                  index,
                   chapter,
                   settings,
                   downloadButton: _buildChapterDownloadButton(
@@ -620,6 +644,7 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
 
   Widget _buildTile(
     BuildContext context,
+    int index,
     Chapter chapter,
     Settings settings, {
     Widget? downloadButton,
@@ -639,18 +664,22 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
 
     if (settings.chapterStyle == 'compact') {
       return _buildCompactTile(context, chapter, data, colors, onTap,
-          downloadButton: downloadButton);
+              downloadButton: downloadButton)
+          .animatePop(index: index, slideX: 0.0, slideY: 1.0);
     }
     if (settings.chapterStyle == 'grid') {
       return _buildGridTile(chapter, data, colors, onTap,
-          downloadButton: downloadButton);
+              downloadButton: downloadButton)
+          .animatePop(index: index, isGrid: true, slideX: 0.0, slideY: 1.0);
     }
     if (settings.chapterStyle == 'detailed') {
       return _buildDetailedTile(context, chapter, data, colors, onTap,
-          downloadButton: downloadButton);
+              downloadButton: downloadButton)
+          .animatePop(index: index, slideX: 0.0, slideY: 1.0);
     }
     return _buildDefaultTile(chapter, data, colors, onTap,
-        downloadButton: downloadButton);
+            downloadButton: downloadButton)
+        .animatePop(index: index, slideX: 0.0, slideY: 1.0);
   }
 
   Widget _buildCompactTile(
@@ -666,96 +695,94 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
         ? chapter.title!.trim()
         : 'Chapter $chNum';
 
-    return StaggeredAnimatedItemWrapper(
-      child: GestureDetector(
-        onTap: onTap,
-        child: Opacity(
-          opacity: data.isRead ? 0.5 : 1.0,
-          child: Container(
-            margin: const EdgeInsets.only(bottom: 8),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            decoration: BoxDecoration(
+    return GestureDetector(
+      onTap: onTap,
+      child: Opacity(
+        opacity: data.isRead ? 0.5 : 1.0,
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: data.isSelected
+                ? colors.primaryContainer.opaque(0.4, iReallyMeanIt: true)
+                : colors.surfaceContainerHighest
+                    .opaque(0.35, iReallyMeanIt: true),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
               color: data.isSelected
-                  ? colors.primaryContainer.opaque(0.4, iReallyMeanIt: true)
-                  : colors.surfaceContainerHighest
-                      .opaque(0.35, iReallyMeanIt: true),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: data.isSelected
-                    ? colors.primary.opaque(0.5, iReallyMeanIt: true)
-                    : colors.onSurface.opaque(0.08, iReallyMeanIt: true),
+                  ? colors.primary.opaque(0.5, iReallyMeanIt: true)
+                  : colors.onSurface.opaque(0.08, iReallyMeanIt: true),
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: data.isSelected
+                      ? colors.primary
+                      : colors.primaryContainer
+                          .opaque(0.3, iReallyMeanIt: true),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: AnymeXText(
+                  chNum,
+                  size: 13,
+                  variant: TextVariant.bold,
+                  color: data.isSelected ? colors.onPrimary : colors.primary,
+                ),
               ),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: data.isSelected
-                        ? colors.primary
-                        : colors.primaryContainer
-                            .opaque(0.3, iReallyMeanIt: true),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: AnymeXText(
-                    chNum,
-                    size: 13,
-                    variant: TextVariant.bold,
-                    color: data.isSelected ? colors.onPrimary : colors.primary,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      AnymeXText(
-                        chTitle,
-                        size: 13,
-                        variant: TextVariant.semiBold,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      if (chapter.scanlator?.isNotEmpty == true) ...[
-                        const SizedBox(height: 2),
-                        AnymeXText(
-                          chapter.scanlator!,
-                          size: 10,
-                          color: colors.onSurface
-                              .opaque(0.6, iReallyMeanIt: true),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                if (downloadButton != null) ...[
-                  const SizedBox(width: 4),
-                  downloadButton,
-                ],
-                if (data.progressValue > 0 && data.progressValue < 0.95) ...[
-                  const SizedBox(width: 10),
-                  SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      value: data.progressValue,
-                      strokeWidth: 2.0,
-                      backgroundColor: colors.primary.withOpacity(0.15),
-                      color: colors.primary,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    AnymeXText(
+                      chTitle,
+                      size: 13,
+                      variant: TextVariant.semiBold,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                  ),
-                ] else if (data.isRead || data.progressValue >= 0.95) ...[
-                  const SizedBox(width: 10),
-                  Icon(
-                    Icons.check_circle_rounded,
-                    size: 18,
-                    color: colors.primary.opaque(0.7, iReallyMeanIt: true),
-                  ),
-                ],
+                    if (chapter.scanlator?.isNotEmpty == true) ...[
+                      const SizedBox(height: 2),
+                      AnymeXText(
+                        chapter.scanlator!,
+                        size: 10,
+                        color:
+                            colors.onSurface.opaque(0.6, iReallyMeanIt: true),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (downloadButton != null) ...[
+                const SizedBox(width: 4),
+                downloadButton,
               ],
-            ),
+              if (data.progressValue > 0 && data.progressValue < 0.95) ...[
+                const SizedBox(width: 10),
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    value: data.progressValue,
+                    strokeWidth: 2.0,
+                    backgroundColor: colors.primary.withOpacity(0.15),
+                    color: colors.primary,
+                  ),
+                ),
+              ] else if (data.isRead || data.progressValue >= 0.95) ...[
+                const SizedBox(width: 10),
+                Icon(
+                  Icons.check_circle_rounded,
+                  size: 18,
+                  color: colors.primary.opaque(0.7, iReallyMeanIt: true),
+                ),
+              ],
+            ],
           ),
         ),
       ),
@@ -829,126 +856,121 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
       if (chapterMetaLabel.isNotEmpty) chapterMetaLabel,
     ].join(' • ');
 
-    return StaggeredAnimatedItemWrapper(
-      child: AnymexOnTap(
-        onTap: onTap,
-        child: Opacity(
-          opacity: data.isRead ? 0.5 : 1,
-          child: Container(
-            margin: const EdgeInsets.only(bottom: 8),
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: data.isSelected
-                  ? colors.secondary.withValues(alpha: 0.4)
-                  : colors.surfaceContainerHighest.opaque(0.4),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: colors.onSurface.opaque(0.08),
-              ),
+    return AnymexOnTap(
+      onTap: onTap,
+      child: Opacity(
+        opacity: data.isRead ? 0.5 : 1,
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: data.isSelected
+                ? colors.secondary.withValues(alpha: 0.4)
+                : colors.surfaceContainerHighest.opaque(0.4),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: colors.onSurface.opaque(0.08),
             ),
-            child: Row(
-              children: [
-                if (data.progressPercentage > 0)
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      borderRadius:
-                          BorderRadius.circular(16.multiplyRadius()),
-                    ),
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: colors.surfaceContainerHighest,
-                          ),
-                        ),
-                        SizedBox(
-                          width: 40,
-                          height: 40,
-                          child: AnymeXProgressIndicator(
-                            value: data.progressValue,
-                            strokeWidth: 4,
-                            backgroundColor: colors.surfaceContainer,
-                          ),
-                        ),
-                        AnymeXText(
-                          '${data.progressPercentage}%',
-                          size: 9,
-                          variant: TextVariant.bold,
-                        ),
-                      ],
-                    ),
-                  )
-                else
-                  Container(
-                    width: 40,
-                    height: 40,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: colors.primary,
-                      borderRadius:
-                          BorderRadius.circular(16.multiplyRadius()),
-                      boxShadow: [glowingShadow(context)],
-                    ),
-                    child: AnymeXText(
-                      chapter.formattedNumber,
-                      variant: TextVariant.bold,
-                      color: colors.onPrimary,
-                    ),
+          ),
+          child: Row(
+            children: [
+              if (data.progressPercentage > 0)
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(16.multiplyRadius()),
                   ),
-                const SizedBox(width: 15),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
+                  child: Stack(
+                    alignment: Alignment.center,
                     children: [
-                      AnymeXText(
-                        '${chapter.title}$progressText',
-                        variant: TextVariant.semiBold,
-                        size: 13,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: colors.surfaceContainerHighest,
+                        ),
                       ),
-                      const SizedBox(height: 5),
+                      SizedBox(
+                        width: 40,
+                        height: 40,
+                        child: AnymeXProgressIndicator(
+                          value: data.progressValue,
+                          strokeWidth: 4,
+                          backgroundColor: colors.surfaceContainer,
+                        ),
+                      ),
                       AnymeXText(
-                        chapterMetaText,
-                        size: 11,
-                        color: colors.inverseSurface.opaque(0.7),
-                        fontStyle: FontStyle.italic,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
+                        '${data.progressPercentage}%',
+                        size: 9,
+                        variant: TextVariant.bold,
                       ),
                     ],
                   ),
-                ),
-                if (downloadButton != null) ...[
-                  const SizedBox(width: 8),
-                  downloadButton,
-                ],
-                const SizedBox(width: 8),
+                )
+              else
                 Container(
-                  decoration:
-                      BoxDecoration(boxShadow: [glowingShadow(context)]),
-                  child: AnymeXContainerButton(
-                    onTap: onTap,
-                    radius: 12,
-                    width: 90,
-                    height: 38,
+                  width: 40,
+                  height: 40,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
                     color: colors.primary,
-                    child: AnymeXText(
-                      'Read',
-                      variant: TextVariant.semiBold,
-                      color: colors.onPrimary,
-                    ),
+                    borderRadius: BorderRadius.circular(16.multiplyRadius()),
+                    boxShadow: [glowingShadow(context)],
+                  ),
+                  child: AnymeXText(
+                    chapter.formattedNumber,
+                    variant: TextVariant.bold,
+                    color: colors.onPrimary,
                   ),
                 ),
+              const SizedBox(width: 15),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    AnymeXText(
+                      '${chapter.title}$progressText',
+                      variant: TextVariant.semiBold,
+                      size: 13,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 5),
+                    AnymeXText(
+                      chapterMetaText,
+                      size: 11,
+                      color: colors.inverseSurface.opaque(0.7),
+                      fontStyle: FontStyle.italic,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              if (downloadButton != null) ...[
+                const SizedBox(width: 8),
+                downloadButton,
               ],
-            ),
+              const SizedBox(width: 8),
+              Container(
+                decoration: BoxDecoration(boxShadow: [glowingShadow(context)]),
+                child: AnymeXContainerButton(
+                  onTap: onTap,
+                  radius: 12,
+                  width: 90,
+                  height: 38,
+                  color: colors.primary,
+                  child: AnymeXText(
+                    'Read',
+                    variant: TextVariant.semiBold,
+                    color: colors.onPrimary,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -975,8 +997,7 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
       ),
       child: ListTile(
         onTap: onTap,
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         leading: data.progressPercentage > 0
             ? SizedBox(
                 width: 32,
@@ -1031,8 +1052,7 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
                 ? Icon(Icons.check_circle_rounded,
                     color: colors.primary, size: 20)
                 : Icon(Icons.circle_outlined,
-                    color:
-                        colors.onSurface.opaque(0.3, iReallyMeanIt: true),
+                    color: colors.onSurface.opaque(0.3, iReallyMeanIt: true),
                     size: 20),
           ],
         ),
@@ -1229,10 +1249,10 @@ class _ChapterListBuilderState extends State<ChapterListBuilder> {
           );
         case DownloadItemStatus.failed:
           return Tooltip(
-            message: state.errorMessage != null &&
-                    state.errorMessage!.isNotEmpty
-                ? 'Download failed: ${state.errorMessage}. Tap to retry.'
-                : 'Download failed. Tap to retry.',
+            message:
+                state.errorMessage != null && state.errorMessage!.isNotEmpty
+                    ? 'Download failed: ${state.errorMessage}. Tap to retry.'
+                    : 'Download failed. Tap to retry.',
             child: Material(
               color: Colors.transparent,
               child: InkWell(

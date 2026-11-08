@@ -36,6 +36,12 @@ class UISettings {
   String appFontFamily;
   double bottomNavBarMargin;
   bool useLegacyNavbar;
+  bool useComputedBlur;
+  bool fullScreenBlur;
+  bool tintBlur;
+  bool usePosterForBlur;
+  int detailsBlurStyle;
+  int detailsBlurScope;
 
   UISettings({
     this.glowMultiplier = 1.0,
@@ -60,7 +66,7 @@ class UISettings {
     this.liquidMode = true,
     this.retainOriginalColor = false,
     this.liquidBackgroundPath = '',
-    this.usePosterColor = false,
+    this.usePosterColor = true,
     this.enablePosterKenBurns = true,
     this.carouselStyle = 0,
     this.useLegacyHeader = false,
@@ -71,6 +77,12 @@ class UISettings {
     this.appFontFamily = '',
     this.bottomNavBarMargin = 32.0,
     this.useLegacyNavbar = true,
+    this.useComputedBlur = true,
+    this.fullScreenBlur = false,
+    this.tintBlur = true,
+    this.usePosterForBlur = true,
+    this.detailsBlurStyle = 0,
+    this.detailsBlurScope = 1,
   })  : homePageCards = homePageCards ??
             {
               "Continue Watching": true,
@@ -132,7 +144,8 @@ class UISettings {
     }
 
     homePageCardsSimkl = Map<String, bool>.from(homePageCardsSimkl);
-    if (homePageCardsSimkl.isNotEmpty && !homePageCardsSimkl.values.any((v) => v)) {
+    if (homePageCardsSimkl.isNotEmpty &&
+        !homePageCardsSimkl.values.any((v) => v)) {
       homePageCardsSimkl[homePageCardsSimkl.keys.first] = true;
     }
   }
@@ -208,8 +221,19 @@ class UISettings {
           UISettingsKeys.appFontFamily.get<String>(uiDefaults.appFontFamily),
       bottomNavBarMargin: UISettingsKeys.bottomNavBarMargin
           .get<double>(uiDefaults.bottomNavBarMargin),
-      useLegacyNavbar: UISettingsKeys.useLegacyNavbar
-          .get<bool>(uiDefaults.useLegacyNavbar),
+      useLegacyNavbar:
+          UISettingsKeys.useLegacyNavbar.get<bool>(uiDefaults.useLegacyNavbar),
+      useComputedBlur:
+          UISettingsKeys.useComputedBlur.get<bool>(uiDefaults.useComputedBlur),
+      fullScreenBlur:
+          UISettingsKeys.fullScreenBlur.get<bool>(uiDefaults.fullScreenBlur),
+      tintBlur: UISettingsKeys.tintBlur.get<bool>(uiDefaults.tintBlur),
+      usePosterForBlur: UISettingsKeys.usePosterForBlur
+          .get<bool>(uiDefaults.usePosterForBlur),
+      detailsBlurStyle:
+          UISettingsKeys.detailsBlurStyle.get<int>(uiDefaults.detailsBlurStyle),
+      detailsBlurScope:
+          UISettingsKeys.detailsBlurScope.get<int>(uiDefaults.detailsBlurScope),
     );
   }
 }

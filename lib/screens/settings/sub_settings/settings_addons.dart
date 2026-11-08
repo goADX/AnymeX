@@ -65,6 +65,7 @@ class _SettingsAddonsState extends State<SettingsAddons> {
       successSnackBar('${addon.name} installed successfully');
     } catch (e) {
       errorSnackBar('Failed to install ${addon.name}: $e');
+      print(e);
     }
     if (mounted) setState(() {});
   }
@@ -75,6 +76,7 @@ class _SettingsAddonsState extends State<SettingsAddons> {
       successSnackBar('${addon.name} updated successfully');
     } catch (e) {
       errorSnackBar('Failed to update ${addon.name}: $e');
+      print(e);
     }
     if (mounted) setState(() {});
   }
@@ -93,27 +95,12 @@ class _SettingsAddonsState extends State<SettingsAddons> {
             snackBar('${addon.name} uninstalled');
           } catch (e) {
             errorSnackBar('Failed to uninstall ${addon.name}: $e');
+            print(e);
           }
           if (mounted) setState(() {});
         },
       ),
     );
-  }
-
-  Future<void> _toggleTorrServer(TorrServerAddon addon) async {
-    try {
-      if (addon.isRunning) {
-        await addon.stop();
-        snackBar('TorrServer stopped');
-      } else {
-        await addon.ensureStarted();
-        snackBar(
-            'TorrServer started on port ${addon.controller?.port ?? 'default'}');
-      }
-    } catch (e) {
-      errorSnackBar('Failed to toggle TorrServer: $e');
-    }
-    if (mounted) setState(() {});
   }
 
   @override
@@ -197,6 +184,7 @@ class _SettingsAddonsState extends State<SettingsAddons> {
                   'Add-ons power background services such as the TorrServer torrent streaming engine for direct magnet link playback.',
                   variant: TextVariant.regular,
                   size: 13,
+                  maxLines: 99,
                   color: theme.onSurfaceVariant,
                 ),
               ],
@@ -275,7 +263,8 @@ class _SettingsAddonsState extends State<SettingsAddons> {
             if (isDownloading) ...[
               const SizedBox(height: 16),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                 decoration: BoxDecoration(
                   color: theme.surfaceContainerHighest.opaque(0.3),
                   borderRadius: BorderRadius.circular(14),
@@ -295,7 +284,8 @@ class _SettingsAddonsState extends State<SettingsAddons> {
                               height: 14,
                               child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(theme.primary),
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                    theme.primary),
                               ),
                             ),
                             const SizedBox(width: 8),
@@ -322,8 +312,10 @@ class _SettingsAddonsState extends State<SettingsAddons> {
                       borderRadius: BorderRadius.circular(999),
                       child: LinearProgressIndicator(
                         value: progress > 0 ? progress : null,
-                        backgroundColor: theme.surfaceContainerHighest.opaque(0.5),
-                        valueColor: AlwaysStoppedAnimation<Color>(theme.primary),
+                        backgroundColor:
+                            theme.surfaceContainerHighest.opaque(0.5),
+                        valueColor:
+                            AlwaysStoppedAnimation<Color>(theme.primary),
                         minHeight: 6,
                       ),
                     ),
@@ -349,7 +341,8 @@ class _SettingsAddonsState extends State<SettingsAddons> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.download_rounded, color: theme.onPrimary, size: 20),
+                      Icon(Icons.download_rounded,
+                          color: theme.onPrimary, size: 20),
                       const SizedBox(width: 8),
                       AnymeXText(
                         'Install ${addon.name}',
@@ -362,92 +355,39 @@ class _SettingsAddonsState extends State<SettingsAddons> {
                 ),
               ),
             ],
-            if (isInstalled && !isDownloading) ...[
+            if (isInstalled && !isDownloading && hasUpdate) ...[
               const SizedBox(height: 14),
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () => _toggleTorrServer(addon),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: isRunning
-                            ? theme.surfaceContainerHighest.opaque(0.6)
-                            : theme.primary,
-                        foregroundColor: isRunning ? theme.onSurface : theme.onPrimary,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        elevation: 0,
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            isRunning ? Icons.stop_rounded : Icons.play_arrow_rounded,
-                            size: 20,
-                            color: isRunning ? theme.onSurface : theme.onPrimary,
-                          ),
-                          const SizedBox(width: 8),
-                          AnymeXText(
-                            isRunning ? 'Stop Service' : 'Start Service',
-                            variant: TextVariant.bold,
-                            size: 15,
-                            color: isRunning ? theme.onSurface : theme.onPrimary,
-                          ),
-                        ],
-                      ),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => _updateAddon(addon),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: theme.tertiary,
+                    foregroundColor: theme.onTertiary,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
                     ),
+                    elevation: 0,
                   ),
-                  if (hasUpdate) ...[
-                    const SizedBox(width: 10),
-                    ElevatedButton(
-                      onPressed: () => _updateAddon(addon),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: theme.tertiary,
-                        foregroundColor: theme.onTertiary,
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        elevation: 0,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.system_update_alt_rounded,
+                        size: 20,
+                        color: theme.onTertiary,
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.system_update_alt_rounded,
-                            size: 20,
-                            color: theme.onTertiary,
-                          ),
-                          const SizedBox(width: 8),
-                          AnymeXText(
-                            'Update',
-                            variant: TextVariant.bold,
-                            size: 15,
-                            color: theme.onTertiary,
-                          ),
-                        ],
+                      const SizedBox(width: 8),
+                      AnymeXText(
+                        'Update to Latest Version',
+                        variant: TextVariant.bold,
+                        size: 15,
+                        color: theme.onTertiary,
                       ),
-                    ),
-                  ],
-                  const SizedBox(width: 10),
-                  OutlinedButton(
-                    onPressed: () => _uninstallAddon(addon),
-                    style: OutlinedButton.styleFrom(
-                      side: BorderSide(color: theme.error.opaque(0.4)),
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                    ),
-                    child: Icon(
-                      Icons.delete_outline_rounded,
-                      size: 20,
-                      color: theme.error,
-                    ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ],
           ],
@@ -512,7 +452,8 @@ class _SettingsAddonsState extends State<SettingsAddons> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.download_rounded, color: theme.onPrimary, size: 20),
+                      Icon(Icons.download_rounded,
+                          color: theme.onPrimary, size: 20),
                       const SizedBox(width: 8),
                       AnymeXText(
                         'Install ${addon.name}',
@@ -541,7 +482,8 @@ class _SettingsAddonsState extends State<SettingsAddons> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.delete_outline_rounded, color: theme.error, size: 20),
+                      Icon(Icons.delete_outline_rounded,
+                          color: theme.error, size: 20),
                       const SizedBox(width: 8),
                       AnymeXText(
                         'Uninstall ${addon.name}',

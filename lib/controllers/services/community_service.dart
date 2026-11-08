@@ -959,7 +959,7 @@ class CommunityService extends GetxController {
     final body = <String, dynamic>{'reason': reason};
 
     final idInt = int.tryParse(media.id);
-    final malInt = int.tryParse(media.idMal ?? '');
+    final malInt = int.tryParse(media.idMal);
 
     if (serviceType == ServicesType.simkl) {
       final rawId = media.id.split('*').first;
@@ -1247,6 +1247,8 @@ class CommunityMedia {
     return CarouselData(
       id: media.id.toString(),
       title: displayTitle,
+      romajiTitle: media.romajiTitle,
+      englishTitle: media.title,
       poster: media.poster,
       extraData: media.rating.toString(),
       servicesType: media.serviceType,

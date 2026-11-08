@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'package:anymex/controllers/source/source_controller.dart';
 import 'package:anymex/screens/manga/controller/reader_controller.dart';
 import 'package:anymex/screens/manga/widgets/reader/continuous_reader.dart';
 import 'package:anymex/screens/manga/widgets/reader/display_refresh_host.dart';
@@ -332,7 +331,6 @@ class _ReaderViewState extends State<ReaderView> with TickerProviderStateMixin {
   Widget _buildImageForPaged(BuildContext context, PageUrl page, int index) {
     return Obx(() {
       final ctrl = widget.controller;
-      final sourceController = Get.find<SourceController>();
 
       final screenWidth = MediaQuery.sizeOf(context).width;
       final multiplier = ctrl.pageWidthMultiplier.value;

@@ -3,6 +3,7 @@ import 'package:anymex/database/isar_models/offline_media.dart';
 import 'package:anymex/screens/downloads/controller/download_controller.dart';
 import 'package:anymex/screens/downloads/controller/download_search_controller.dart';
 import 'package:anymex/screens/downloads/widgets/download_permission_dialog.dart';
+import 'package:anymex/utils/language.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_bottomsheet.dart';
 import 'package:anymex/utils/theme_extensions.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_button.dart';
@@ -17,12 +18,14 @@ class MangaChapterDownloadConfirm extends StatelessWidget {
   final List<Chapter> chapters;
   final Source source;
   final OfflineMedia media;
+  final bool isFromMetadataPage;
 
   const MangaChapterDownloadConfirm({
     super.key,
     required this.chapters,
     required this.source,
     required this.media,
+    this.isFromMetadataPage = true,
   });
 
   static Future<void> show(
@@ -30,6 +33,7 @@ class MangaChapterDownloadConfirm extends StatelessWidget {
     required List<Chapter> chapters,
     required Source source,
     required OfflineMedia media,
+    bool isFromMetadataPage = true,
   }) async {
     if (!await DownloadPermissionDialog.checkAndPrompt(context)) {
       return;
@@ -40,6 +44,7 @@ class MangaChapterDownloadConfirm extends StatelessWidget {
         chapters: chapters,
         source: source,
         media: media,
+        isFromMetadataPage: isFromMetadataPage,
       ),
       context,
       showDragHandle: true,
@@ -106,7 +111,9 @@ class MangaChapterDownloadConfirm extends StatelessWidget {
                   theme: theme,
                   icon: HugeIcons.strokeRoundedGlobe,
                   label: 'Source',
-                  value: source.name ?? 'Unknown',
+                  value: (source.lang ?? '').isNotEmpty
+                      ? '${source.name ?? 'Unknown'} (${completeLanguageName(source.lang!)})'
+                      : (source.name ?? 'Unknown'),
                 ),
                 const SizedBox(height: 12),
                 _buildInfoRow(
@@ -171,16 +178,18 @@ class MangaChapterDownloadConfirm extends StatelessWidget {
     final downloadController = Get.find<DownloadController>();
     Navigator.pop(context);
 
-    final ctrl = Get.find<DownloadSearchController>();
-    ctrl.resetDetail();
+    if (Get.isRegistered<DownloadSearchController>()) {
+      Get.find<DownloadSearchController>().resetDetail();
+    }
 
     downloadController.enqueueMangaDownloadBatch(
       chapters: chapters,
       source: source,
       media: media,
+      isFromMetadataPage: isFromMetadataPage,
     );
 
-    snackBar('Downloading ${ chapters.length} chapter${chapters.length != 1 ? 's' : ''}...');
+    snackBar('Downloading ${chapters.length} chapter${chapters.length != 1 ? 's' : ''}...');
   }
 
   Widget _buildInfoRow({

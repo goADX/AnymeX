@@ -1,4 +1,5 @@
 import 'package:anymex/controllers/service_handler/service_handler.dart';
+import 'package:anymex/controllers/services/anilist/anilist_auth.dart';
 import 'package:anymex/database/isar_models/track.dart';
 import 'package:anymex/database/isar_models/video.dart';
 import 'package:anymex/models/Media/media.dart';
@@ -39,7 +40,19 @@ class OfflineMedia {
         return alt;
       }
     }
-    return name ?? '?';
+    if (Get.isRegistered<AnilistAuth>() &&
+        Get.find<AnilistAuth>().isLoggedIn.value) {
+      final lang =
+          Get.find<AnilistAuth>().cachedSettings?.titleLanguage.toUpperCase();
+      if (lang == 'ROMAJI' && (jname?.isNotEmpty ?? false)) {
+        return jname!;
+      } else if (lang == 'NATIVE' && (japanese?.isNotEmpty ?? false)) {
+        return japanese!;
+      } else if (lang == 'ENGLISH' && (english?.isNotEmpty ?? false)) {
+        return english!;
+      }
+    }
+    return english ?? name ?? '?';
   }
 
   @ignore
@@ -167,28 +180,28 @@ class OfflineMedia {
 
   factory OfflineMedia.fromJson(Map<String, dynamic> json) {
     return OfflineMedia(
-      mediaId: json['id'] as String?,
-      idMal: json['idMal'] as String?,
-      jname: json['jname'] as String?,
-      name: json['name'] as String?,
-      english: json['english'] as String?,
-      japanese: json['japanese'] as String?,
-      description: json['description'] as String?,
-      poster: json['poster'] as String?,
-      cover: json['cover'] as String?,
-      totalEpisodes: json['totalEpisodes'] as String?,
-      type: json['type'] as String?,
-      season: json['season'] as String?,
-      premiered: json['premiered'] as String?,
-      duration: json['duration'] as String?,
-      status: json['status'] as String?,
-      rating: json['rating'] as String?,
-      popularity: json['popularity'] as String?,
-      format: json['format'] as String?,
-      aired: json['aired'] as String?,
-      totalChapters: json['totalChapters'] as String?,
-      genres: (json['genres'] as List<dynamic>?)?.cast<String>(),
-      studios: (json['studios'] as List<dynamic>?)?.cast<String>(),
+      mediaId: (json['id'] ?? json['mediaId'])?.toString(),
+      idMal: json['idMal']?.toString(),
+      jname: json['jname']?.toString(),
+      name: json['name']?.toString(),
+      english: json['english']?.toString(),
+      japanese: json['japanese']?.toString(),
+      description: json['description']?.toString(),
+      poster: json['poster']?.toString(),
+      cover: json['cover']?.toString(),
+      totalEpisodes: json['totalEpisodes']?.toString(),
+      type: json['type']?.toString(),
+      season: json['season']?.toString(),
+      premiered: json['premiered']?.toString(),
+      duration: json['duration']?.toString(),
+      status: json['status']?.toString(),
+      rating: json['rating']?.toString(),
+      popularity: json['popularity']?.toString(),
+      format: json['format']?.toString(),
+      aired: json['aired']?.toString(),
+      totalChapters: json['totalChapters']?.toString(),
+      genres: (json['genres'] as List<dynamic>?)?.map((e) => e.toString()).toList(),
+      studios: (json['studios'] as List<dynamic>?)?.map((e) => e.toString()).toList(),
       chapters: (json['chapters'] as List<dynamic>?)
           ?.map((c) => Chapter.fromJson(c as Map<String, dynamic>))
           .toList(),
@@ -207,8 +220,8 @@ class OfflineMedia {
       readChapters: (json['readChapters'] as List<dynamic>?)
           ?.map((c) => Chapter.fromJson(c as Map<String, dynamic>))
           .toList(),
-      serviceIndex: json['serviceIndex'] as int? ?? 0,
-      mediaTypeIndex: json['mediaTypeIndex'] as int? ?? 0,
+      serviceIndex: (json['serviceIndex'] as num?)?.toInt() ?? 0,
+      mediaTypeIndex: (json['mediaTypeIndex'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -216,8 +229,10 @@ class OfflineMedia {
     return Media(
       id: mediaId ?? '',
       idMal: idMal ?? '',
-      title: name ?? '',
-      romajiTitle: jname ?? japanese ?? '',
+      title: displayTitle,
+      englishTitle: english ?? name,
+      romajiTitle: jname ?? japanese ?? name ?? '',
+      nativeTitle: japanese,
       description: description ?? '',
       poster: poster ?? '',
       cover: cover,

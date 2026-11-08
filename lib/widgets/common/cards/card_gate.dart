@@ -30,8 +30,13 @@ double getGridCardAspectRatio({
   final screenWidth = MediaQuery.sizeOf(context).width;
   final desktop = screenWidth > 600;
   final columnWidth = (screenWidth - padding - (spacing * (crossAxisCount - 1))) / crossAxisCount;
-  final extraHeight = MediaCardRegistry.getExtraHeightByIndex(settingsController.cardStyle, desktop);
-  final cellHeight = columnWidth * 1.4 + extraHeight;
+  final styleIdx = settingsController.cardStyle;
+  final config = settingsController.customCardStyle;
+  final extraHeight = MediaCardRegistry.getExtraHeightByIndex(styleIdx, desktop);
+  final posterHeight = (styleIdx == 0 && config.aspectRatio == '2:3' && !config.isLandscape)
+      ? columnWidth * (desktop ? (215.0 / 175.0) : (162.0 / 140.0))
+      : columnWidth / config.ratioValue;
+  final cellHeight = posterHeight + extraHeight;
   return columnWidth / cellHeight;
 }
 
@@ -80,6 +85,8 @@ class MediaCardGate extends StatelessWidget {
   CarouselData convertData(OfflineMedia data, {bool isManga = false}) {
     return CarouselData(
       title: data.displayTitle,
+      romajiTitle: data.jname ?? data.japanese,
+      englishTitle: data.english ?? data.name,
       id: data.id.toString(),
       poster: data.poster,
       extraData: data.rating,

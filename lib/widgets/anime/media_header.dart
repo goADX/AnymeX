@@ -1,14 +1,19 @@
+import 'dart:io';
 import 'dart:ui';
 import 'package:anymex/controllers/services/anilist/anilist_data.dart';
 import 'package:anymex/controllers/settings/methods.dart';
 import 'package:anymex/controllers/settings/settings.dart';
+import 'package:anymex/database/data_keys/keys.dart';
 import 'package:anymex/models/Media/media.dart';
 import 'package:anymex/screens/anime/studio_details_page.dart';
+import 'package:anymex/screens/settings/sub_settings/settings_ui_details.dart';
+import 'package:anymex/utils/function.dart';
 import 'package:anymex/utils/theme_extensions.dart';
 import 'package:anymex/widgets/anime/visuals/visuals_popup.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_container.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_image.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
+import 'package:anymex/widgets/common/baked_blur_image.dart';
 import 'package:anymex/widgets/helper/tv_wrapper.dart';
 import 'package:anymex/widgets/non_widgets/snackbar.dart';
 import 'package:anymex_extension_runtime_bridge/anymex_extension_runtime_bridge.dart';
@@ -25,6 +30,7 @@ class MediaHeader extends StatelessWidget {
     this.onShare,
     this.userStatus,
     this.userProgress,
+    this.extendBehindTitleBar = false,
   });
 
   final Media? data;
@@ -33,13 +39,15 @@ class MediaHeader extends StatelessWidget {
   final VoidCallback? onShare;
   final String? userStatus;
   final String? userProgress;
+  final bool extendBehindTitleBar;
 
   @override
   Widget build(BuildContext context) {
     final isDesktop = MediaQuery.sizeOf(context).width > 700;
     final colors = context.colors;
-    final headerHeight = isDesktop ? 440.0 : 360.0;
-    final coverUrl = data?.cover ?? posterUrl;
+    final desktopTopPad =
+        (Platform.isWindows && extendBehindTitleBar) ? 40.0 : 0.0;
+    final headerHeight = (isDesktop ? 440.0 : 360.0) + desktopTopPad;
     final topPad = MediaQuery.paddingOf(context).top;
 
     final posterWidth = isDesktop ? 158.0 : 120.0;
@@ -55,40 +63,107 @@ class MediaHeader extends StatelessWidget {
       child: Stack(
         alignment: Alignment.bottomCenter,
         children: [
-          // just so i remember this my cover
           Positioned.fill(
             child: Obx(() {
-              final liquidMode = settingsController.liquidMode;
-              return ImageFiltered(
-                imageFilter: ImageFilter.blur(sigmaX: 20.0, sigmaY: 20.0),
-                child: AnymeXImage(
-                  imageUrl: coverUrl,
-                  errorImage: data?.poster,
-                  radius: 0,
-                  height: headerHeight,
-                  width: double.infinity,
-                  color: liquidMode ? colors.primary.opaque(0.4) : null,
-                  fit: BoxFit.cover,
-                ),
+              final blurScope = settingsController.detailsBlurScope;
+              if (blurScope != 0) {
+                return const SizedBox.shrink();
+              }
+              final usePoster = settingsController.usePosterForBlur;
+              final effectiveCover =
+                  (data?.cover?.isNotEmpty == true ? data!.cover! : posterUrl);
+              final blurSourceUrl = usePoster ? posterUrl : effectiveCover;
+              final blurFallbackUrl = usePoster ? effectiveCover : posterUrl;
+              if (blurSourceUrl.isEmpty) {
+                return const SizedBox.shrink();
+              }
+              final tintBlur = settingsController.tintBlur;
+              final blurColor = tintBlur ? colors.primary.opaque(0.4) : null;
+              final isMesh = settingsController.detailsBlurStyle == 1;
+              final isBaked = isMesh || settingsController.useComputedBlur;
+              final blurAmount =
+                  UISettingsKeys.detailsBlurAmount.get<double>(20.0);
+              final brightness =
+                  UISettingsKeys.detailsBackdropBrightness.get<double>(1.0);
+
+              Widget content = isBaked
+                  ? BakedBlurImage(
+                      url: blurSourceUrl,
+                      fallback: blurFallbackUrl,
+                      saturation: 1.0,
+                      blurAmount: blurAmount,
+                      brightness: brightness,
+                      color: blurColor,
+                      fit: BoxFit.cover,
+                      height: headerHeight,
+                      width: double.infinity,
+                      fadeBottom: true,
+                      isMesh: isMesh,
+                    )
+                  : ColorFiltered(
+                      colorFilter: ColorFilter.matrix([
+                        brightness,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        brightness,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        brightness,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        0,
+                      ]),
+                      child: ImageFiltered(
+                        imageFilter: ImageFilter.blur(
+                            sigmaX: blurAmount, sigmaY: blurAmount),
+                        child: AnymeXImage(
+                          imageUrl: blurSourceUrl,
+                          errorImage: blurFallbackUrl,
+                          radius: 0,
+                          height: headerHeight,
+                          width: double.infinity,
+                          color: blurColor,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                    );
+
+              return RepaintBoundary(
+                child: content,
               );
             }),
           ),
-          // this my gradient
           Positioned.fill(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    colors.surface.withValues(alpha: 0.60),
-                    colors.surface.withValues(alpha: 0.25),
-                    Colors.transparent,
-                  ],
-                  stops: const [0.0, 0.50, 1.0],
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
+            child: Obx(() {
+              final blurScope = settingsController.detailsBlurScope;
+              if (blurScope != 0) {
+                return const SizedBox.shrink();
+              }
+              return Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      colors.surface.withValues(alpha: 0.60),
+                      colors.surface.withValues(alpha: 0.25),
+                      Colors.transparent,
+                    ],
+                    stops: const [0.0, 0.50, 1.0],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                  ),
                 ),
-              ),
-            ),
+              );
+            }),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
@@ -99,7 +174,8 @@ class MediaHeader extends StatelessWidget {
                   onTap: () {
                     Get.to(
                       () => VisualsPopup(
-                        animeTitle: data?.title ?? 'Unknown',
+                        animeTitle:
+                            data?.displayTitle ?? data?.title ?? 'Unknown',
                         malId: data?.idMal.toString() ?? data?.id.toString(),
                         originalCover: posterUrl,
                         isAnime: data?.mediaType.name.toUpperCase() == 'ANIME',
@@ -148,11 +224,13 @@ class MediaHeader extends StatelessWidget {
                     children: [
                       GestureDetector(
                         onLongPress: () {
-                          final title = data?.title ?? 'Loading...';
+                          final title =
+                              data?.displayTitle ?? data?.title ?? 'Loading...';
                           Clipboard.setData(ClipboardData(text: title));
                           snackBar('Title copied');
                         },
-                        child: AnymeXText(data?.title ?? 'Loading...',
+                        child: AnymeXText(
+                          data?.displayTitle ?? data?.title ?? 'Loading...',
                           variant: TextVariant.bold,
                           size: isDesktop ? 28 : 20,
                           maxLines: 3,
@@ -182,7 +260,9 @@ class MediaHeader extends StatelessWidget {
                           }
 
                           final studioName = creator;
-                          final canOpenStudio = isAnime && studioName != null && studioName != 'Unknown';
+                          final canOpenStudio = isAnime &&
+                              studioName != null &&
+                              studioName != 'Unknown';
 
                           return Row(
                             mainAxisSize: MainAxisSize.min,
@@ -199,9 +279,8 @@ class MediaHeader extends StatelessWidget {
                                       : Icons.brush_outlined,
                                   onTap: canOpenStudio
                                       ? () async {
-                                          final studioId =
-                                              await AnilistData.fetchStudioIdByName(
-                                                  studioName);
+                                          final studioId = await AnilistData
+                                              .fetchStudioIdByName(studioName);
                                           if (studioId != null &&
                                               context.mounted) {
                                             showStudioDetailsSheet(
@@ -234,35 +313,37 @@ class MediaHeader extends StatelessWidget {
             ),
           ),
           Positioned(
-            top: topPad + 12,
-            left: 16,
-            child: AnymexOnTap(
-              onTap: () {
-                Navigator.of(context, rootNavigator: true)
-                    .popUntil((route) => route.isFirst);
-              },
-              margin: 0,
-              child: _HeaderButton(
-                colors: colors,
-                child: Icon(
-                  Icons.home_rounded,
-                  size: 20,
-                  color: colors.onSurface,
+              top: topPad + desktopTopPad + 12,
+              left: 16,
+              child: AnymexOnTap(
+                onTap: () {
+                  Navigator.of(context, rootNavigator: true)
+                      .popUntil((route) => route.isFirst);
+                },
+                margin: 0,
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: colors.surfaceContainerHigh
+                        .opaque(0.2, iReallyMeanIt: true),
+                    borderRadius: BorderRadius.circular(50),
+                  ),
+                  child: Icon(
+                    Icons.home_rounded,
+                    size: 20,
+                    color: colors.onSurface,
+                  ),
                 ),
-              ),
-            ),
-          ),
+              )),
           Positioned(
-            top: topPad + 12,
+            top: topPad + desktopTopPad + 12,
             right: 16,
             child: Container(
               decoration: BoxDecoration(
-                color: colors.surfaceContainerHighest
-                    .opaque(0.6, iReallyMeanIt: true),
+                color: colors.surfaceContainerHigh
+                    .opaque(0.2, iReallyMeanIt: true),
                 borderRadius: BorderRadius.circular(24),
-                border: Border.all(
-                  color: colors.onSurface.opaque(0.1, iReallyMeanIt: true),
-                ),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -288,6 +369,25 @@ class MediaHeader extends StatelessWidget {
                     ),
                   ],
                   AnymexOnTap(
+                    onTap: () => navigateWithAnimation(
+                        () => SettingsUiDetails(media: data)),
+                    margin: 0,
+                    child: SizedBox(
+                      width: 44,
+                      height: 40,
+                      child: Icon(
+                        Icons.palette_rounded,
+                        size: 20,
+                        color: colors.onSurface,
+                      ),
+                    ),
+                  ),
+                  Container(
+                    width: 1,
+                    height: 22,
+                    color: colors.onSurface.opaque(0.12, iReallyMeanIt: true),
+                  ),
+                  AnymexOnTap(
                     onTap: Get.back,
                     margin: 0,
                     child: SizedBox(
@@ -309,8 +409,7 @@ class MediaHeader extends StatelessWidget {
     );
   }
 
-  Widget _buildMetaData(
-      BuildContext context, String val, BorderRadius? radius,
+  Widget _buildMetaData(BuildContext context, String val, BorderRadius? radius,
       {VoidCallback? onTap, IconData? icon}) {
     final chip = AnymeXContainer(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
@@ -353,28 +452,5 @@ class MediaHeader extends StatelessWidget {
       );
     }
     return chip;
-  }
-}
-
-class _HeaderButton extends StatelessWidget {
-  const _HeaderButton({required this.colors, required this.child});
-
-  final ColorScheme colors;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 40,
-      height: 40,
-      decoration: BoxDecoration(
-        color: colors.surfaceContainerHighest.opaque(0.6, iReallyMeanIt: true),
-        shape: BoxShape.circle,
-        border: Border.all(
-          color: colors.onSurface.opaque(0.1, iReallyMeanIt: true),
-        ),
-      ),
-      child: child,
-    );
   }
 }

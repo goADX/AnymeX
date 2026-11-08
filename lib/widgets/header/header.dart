@@ -6,6 +6,8 @@ import 'package:anymex/controllers/settings/settings.dart';
 import 'package:anymex/controllers/source/source_controller.dart';
 import 'package:anymex/controllers/ui/greeting.dart';
 import 'package:anymex/database/data_keys/keys.dart';
+import 'package:anymex/controllers/services/anilist/anilist_auth.dart';
+import 'package:anymex/services/commentum_service.dart';
 import 'package:anymex/screens/profile/profile_page.dart';
 import 'package:anymex/screens/library/controller/library_controller.dart';
 import 'package:anymex/utils/function.dart';
@@ -86,10 +88,20 @@ class Header extends StatelessWidget {
       }
 
       final effectiveLeading = leading ?? const HeaderProfileAvatar();
-      final effectiveTitle = titleWidget ??
+      final baseTitle = titleWidget ??
           (title != null
               ? HeaderTitle(title: title!, color: titleColor)
               : const SizedBox.shrink());
+      final effectiveTitle = settingsController.isIncognito.value
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                baseTitle,
+                _buildIncognitoBadge(context),
+              ],
+            )
+          : baseTitle;
       final effectiveSubtitle = subtitleWidget ??
           (subtitle != null
               ? HeaderSubtitle(subtitle: subtitle!)
@@ -217,6 +229,35 @@ class Header extends StatelessWidget {
       );
       return _FloatingHeaderWrapper(child: content);
     });
+  }
+
+  Widget _buildIncognitoBadge(BuildContext context) {
+    final theme = Theme.of(context).colorScheme;
+    return AnymexOnTap(
+      onTap: () => SettingsSheet.show(context),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        margin: const EdgeInsets.only(left: 8),
+        decoration: BoxDecoration(
+          color: theme.error.opaque(0.15),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: theme.error.opaque(0.3)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Iconsax.eye_slash, size: 12, color: theme.error),
+            const SizedBox(width: 4),
+            AnymeXText(
+              'Incognito',
+              size: 11,
+              variant: TextVariant.bold,
+              color: theme.error,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -359,6 +400,18 @@ class HeaderProfileAvatar extends StatelessWidget {
         child: Obx(() {
           final count =
               Get.find<SourceController>().extensionUpdatesCount.value;
+          int unread = 0;
+          try {
+            if (Get.isRegistered<AnilistAuth>()) {
+              unread += Get.find<AnilistAuth>().unreadAnilistCount.value;
+            }
+          } catch (_) {}
+          try {
+            if (Get.isRegistered<CommentumService>()) {
+              unread +=
+                  Get.find<CommentumService>().unreadNotificationCount.value;
+            }
+          } catch (_) {}
           final avatar = CircleAvatar(
             radius: radius,
             backgroundColor: context.colors.secondaryContainer.opaque(0.50),
@@ -380,6 +433,14 @@ class HeaderProfileAvatar extends StatelessWidget {
                     size: 18,
                   ),
           );
+          if (unread > 0) {
+            return AnymeXBadge(
+              label: unread > 99 ? '99+' : '$unread',
+              backgroundColor: Theme.of(context).colorScheme.error,
+              textColor: Colors.white,
+              child: avatar,
+            );
+          }
           if (count > 0) {
             return AnymeXBadge(
               label: count.toString(),

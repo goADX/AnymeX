@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:anymex/utils/language.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_bottomsheet.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_image.dart';
@@ -166,7 +164,7 @@ class SourceSelectorWidget extends StatelessWidget {
                 ),
               ),
               if (hasSource) ...[
-                if (onCloudflareBypass != null && !Platform.isLinux)
+                if (onCloudflareBypass != null)
                   _ActionIconButton(
                     icon: Icons.security_rounded,
                     onTap: onCloudflareBypass!,

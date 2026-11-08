@@ -53,6 +53,8 @@ class AnymeXPills extends StatelessWidget {
 
   final bool expandEqually;
 
+  final bool wrap;
+
   const AnymeXPills({
     super.key,
     required this.items,
@@ -64,6 +66,7 @@ class AnymeXPills extends StatelessWidget {
     this.scrollPadding = const EdgeInsets.symmetric(vertical: 4),
     this.selectedOuterRadius = 50.0,
     this.expandEqually = false,
+    this.wrap = false,
   });
 
   double get _effectiveGap =>
@@ -109,6 +112,24 @@ class AnymeXPills extends StatelessWidget {
   Widget build(BuildContext context) {
     if (items.isEmpty) return const SizedBox.shrink();
 
+    if (wrap) {
+      return Padding(
+        padding: scrollPadding,
+        child: Wrap(
+          spacing: _effectiveGap,
+          runSpacing: 8.0,
+          children: [
+            for (int i = 0; i < items.length; i++)
+              _PillCell(
+                item: items[i],
+                borderRadius: _borderFor(i),
+                selectedBorderRadius: _selectedBorderFor(i),
+              ),
+          ],
+        ),
+      );
+    }
+
     final row = Row(
       mainAxisSize: expandEqually ? MainAxisSize.max : MainAxisSize.min,
       children: [
@@ -120,6 +141,7 @@ class AnymeXPills extends StatelessWidget {
                 item: items[i],
                 borderRadius: _borderFor(i),
                 selectedBorderRadius: _selectedBorderFor(i),
+                isExpanded: true,
               ),
             )
           else
@@ -127,6 +149,7 @@ class AnymeXPills extends StatelessWidget {
               item: items[i],
               borderRadius: _borderFor(i),
               selectedBorderRadius: _selectedBorderFor(i),
+              isExpanded: false,
             ),
         ],
       ],
@@ -147,11 +170,13 @@ class _PillCell extends StatelessWidget {
   final PillItem item;
   final BorderRadius borderRadius;
   final BorderRadius selectedBorderRadius;
+  final bool isExpanded;
 
   const _PillCell({
     required this.item,
     required this.borderRadius,
     required this.selectedBorderRadius,
+    this.isExpanded = false,
   });
 
   BorderRadius get _activeRadius =>
@@ -166,6 +191,7 @@ class _PillCell extends StatelessWidget {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         curve: Curves.easeOutCubic,
+        alignment: isExpanded ? Alignment.center : null,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
           color: item.isSelected

@@ -4,7 +4,6 @@ import 'package:anymex/controllers/settings/settings.dart';
 import 'package:anymex/controllers/theme.dart';
 import 'package:anymex/utils/theme_extensions.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_header.dart';
-import 'package:anymex/widgets/helper/platform_builder.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -52,6 +51,7 @@ class AnymeXScaffold extends StatelessWidget {
   final String color;
   final bool disabled;
   final bool isTabScreen;
+  final bool extendBehindTitleBar;
 
   final bool showHeader;
   final String? headerTitle;
@@ -94,6 +94,7 @@ class AnymeXScaffold extends StatelessWidget {
     this.color = '',
     this.disabled = false,
     this.isTabScreen = false,
+    this.extendBehindTitleBar = false,
     this.showHeader = false,
     this.headerTitle,
     this.headerSubtitle,
@@ -125,6 +126,8 @@ class AnymeXScaffold extends StatelessWidget {
     });
   }
 
+  static Color? parseColor(String hex) => _parseColor(hex);
+
   static Color? _parseColor(String hex) {
     try {
       final clean = hex.replaceAll('#', '').trim();
@@ -133,6 +136,10 @@ class AnymeXScaffold extends StatelessWidget {
       } else if (clean.length == 8) {
         return Color(int.parse('0x$clean'));
       }
+      final directInt = int.tryParse(clean);
+      if (directInt != null) {
+        return Color(directInt);
+      }
     } catch (_) {}
     return null;
   }
@@ -140,7 +147,6 @@ class AnymeXScaffold extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final settings = Get.find<Settings>();
-    final theme = _getTheme(context, settings);
     final isDesktop = Platform.isWindows;
     final isOled = Provider.of<ThemeProvider>(context).isOled;
 
@@ -185,26 +191,36 @@ class AnymeXScaffold extends StatelessWidget {
       restorationId: restorationId,
     );
 
-    final ch = (isDesktop && !disabled)
+    final ch = (isDesktop && !disabled && !extendBehindTitleBar)
         ? Container(
             margin: const EdgeInsets.only(top: 40),
             child: scaffold,
           )
         : scaffold;
 
-    if (disabled || (isOled && isDesktop)) {
-      return Container(
-        color: isOled
-            ? Colors.black
-            : isTabScreen
-                ? Colors.transparent
-                : theme.surface,
-        child: ch,
-      );
-    }
-
     return Obx(() {
       settings.liquidBackgroundPath;
+      settings.retainOriginalColor;
+      settings.usePosterColor;
+      final theme = _getTheme(context, settings);
+      final themedCh = (color.isNotEmpty && settings.usePosterColor)
+          ? Theme(
+              data: Theme.of(context).copyWith(colorScheme: theme),
+              child: ch,
+            )
+          : ch;
+
+      if (disabled || (isOled && isDesktop)) {
+        return Container(
+          color: isOled
+              ? Colors.black
+              : isTabScreen
+                  ? Colors.transparent
+                  : theme.surface,
+          child: themedCh,
+        );
+      }
+
       final liquidMode = settings.liquidMode;
 
       Widget content;
@@ -213,7 +229,7 @@ class AnymeXScaffold extends StatelessWidget {
           context: context,
           theme: theme,
           isOled: isOled,
-          child: ch,
+          child: themedCh,
         );
       } else {
         content = Stack(
@@ -231,7 +247,7 @@ class AnymeXScaffold extends StatelessWidget {
                   end: end,
                 ),
               ),
-            ch,
+            themedCh,
           ],
         );
       }
@@ -262,34 +278,45 @@ class AnymeXScaffold extends StatelessWidget {
     required bool isOled,
     required Widget child,
   }) {
-    final imagePath = settingsController.liquidBackgroundPath.isEmpty
-        ? 'assets/images/bg_glass.webp'
-        : "file://${settingsController.liquidBackgroundPath}";
+    final hasCustomBg = settingsController.liquidBackgroundPath.isNotEmpty;
+    final imagePath = hasCustomBg
+        ? "file://${settingsController.liquidBackgroundPath}"
+        : 'assets/images/bg_glass.webp';
 
     final fallbackColor = isOled
         ? (theme.brightness == Brightness.dark ? Colors.black : Colors.white)
         : theme.surface;
+
+    final Color? tintColor = settingsController.retainOriginalColor
+        ? null
+        : theme.primary.opaque(0.6);
 
     return Container(
       color: fallbackColor,
       child: Stack(
         children: [
           Positioned.fill(
-            child: Obx(() => _buildCachedColorFilteredImage(
-                  context: context,
-                  imagePath: imagePath,
-                  color: settingsController.retainOriginalColor
-                      ? null
-                      : theme.primary.opaque(0.6),
-                )),
-          ),
-          Positioned.fill(
-            child: isOled
-                ? Container(color: Colors.black)
-                : _buildGradientOverlay(
-                    gradientVariant: GradientVariant.subtle,
-                    theme: theme,
+            child: RepaintBoundary(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  _buildCachedColorFilteredImage(
+                    context: context,
+                    imagePath: imagePath,
+                    color: tintColor,
                   ),
+                  if (!hasCustomBg) ...[
+                    if (isOled)
+                      Container(color: Colors.black)
+                    else
+                      _buildGradientOverlay(
+                        gradientVariant: GradientVariant.subtle,
+                        theme: theme,
+                      ),
+                  ],
+                ],
+              ),
+            ),
           ),
           child,
         ],
@@ -301,11 +328,9 @@ class AnymeXScaffold extends StatelessWidget {
     required GradientVariant gradientVariant,
     required ColorScheme theme,
   }) {
-    return RepaintBoundary(
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: _getGradient(gradientVariant, theme),
-        ),
+    return Container(
+      decoration: BoxDecoration(
+        gradient: _getGradient(gradientVariant, theme),
       ),
     );
   }
@@ -429,32 +454,23 @@ class AnymeXScaffold extends StatelessWidget {
     Color? color,
   }) {
     final isFile = imagePath.startsWith('file://');
-    final image = isFile
+    return isFile
         ? Image.file(
             File(imagePath.replaceFirst('file://', '')),
-            fit: getResponsiveValue(
-              context,
-              mobileValue: BoxFit.fitHeight,
-              desktopValue: BoxFit.cover,
-            ),
+            fit: BoxFit.cover,
             filterQuality: FilterQuality.low,
+            color: color,
+            colorBlendMode: color != null ? BlendMode.color : null,
+            gaplessPlayback: true,
           )
         : Image.asset(
             imagePath,
-            fit: getResponsiveValue(
-              context,
-              mobileValue: BoxFit.fitHeight,
-              desktopValue: BoxFit.cover,
-            ),
+            fit: BoxFit.cover,
             filterQuality: FilterQuality.low,
+            color: color,
+            colorBlendMode: color != null ? BlendMode.color : null,
+            gaplessPlayback: true,
           );
-
-    return color != null
-        ? ColorFiltered(
-            colorFilter: ColorFilter.mode(color, BlendMode.color),
-            child: image,
-          )
-        : image;
   }
 
   Widget _buildLightweightGlow({

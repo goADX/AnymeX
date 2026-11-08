@@ -5,6 +5,7 @@ import 'package:anymex/database/data_keys/keys.dart';
 import 'package:anymex/screens/anime/watch/controller/player_controller.dart';
 import 'package:anymex/screens/anime/watch/controls/widgets/control_button.dart';
 import 'package:anymex/screens/anime/watch/controls/widgets/progress_slider.dart';
+import 'package:anymex/controllers/watchium/watchium_service.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
 import 'package:flutter/material.dart';
 import 'package:anymex/utils/theme_extensions.dart';
@@ -253,6 +254,15 @@ class BottomControls extends StatelessWidget {
         tooltip: 'Playlist',
         compact: true,
       ),
+      'torrent': ControlButton(
+        icon: Icons.folder_zip_rounded,
+        onPressed: () {
+          controller.isTorrentFilesPaneOpened.value =
+              !controller.isTorrentFilesPaneOpened.value;
+        },
+        tooltip: 'Torrent Files',
+        compact: true,
+      ),
       'shaders': ControlButton(
         icon: Icons.tune_rounded,
         onPressed: () => controller.openColorProfileBottomSheet(context),
@@ -328,29 +338,52 @@ class BottomControls extends StatelessWidget {
         tooltip: 'External Player',
         compact: true,
       ),
-      // 'watch_together': Obx(() {
-      //   final watchium = Get.find<WatchiumService>();
-      //   return ControlButton(
-      //     icon: watchium.inRoom.value
-      //         ? Icons.people_rounded
-      //         : Icons.people_outline_rounded,
-      //     onPressed: () {
-      //       if (watchium.inRoom.value) {
-      //         watchium.isPartyPaneOpened.value =
-      //             !watchium.isPartyPaneOpened.value;
-      //       } else {
-      //         showWatchiumCreateSheet(
-      //           context: Get.context!,
-      //           playerController: controller,
-      //         );
-      //       }
-      //     },
-      //     tooltip: watchium.inRoom.value
-      //         ? 'Watch Together (In Room)'
-      //         : 'Watch Together',
-      //     compact: true,
-      //   );
-      // }),
+      'watch_together': Obx(() {
+        final watchium = Get.find<WatchiumService>();
+        final inRoom = watchium.inRoom.value;
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            ControlButton(
+              icon: inRoom
+                  ? Icons.people_rounded
+                  : Icons.people_outline_rounded,
+              onPressed: () {
+                if (inRoom) {
+                  watchium.isPartyPaneOpened.value =
+                      !watchium.isPartyPaneOpened.value;
+                } else {
+                  controller.isWatchTogetherPaneOpened.value =
+                      !controller.isWatchTogetherPaneOpened.value;
+                }
+              },
+              tooltip: inRoom
+                  ? 'Watch Together (In Room)'
+                  : 'Watch Together',
+              compact: true,
+            ),
+            if (inRoom)
+              Positioned(
+                right: 1,
+                top: 1,
+                child: IgnorePointer(
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: Colors.red,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: Colors.white,
+                        width: 1.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      }),
       'cast': ControlButton(
         icon: Icons.cast_rounded,
         onPressed: () => CastDeviceDialog.show(context, controller),
@@ -369,6 +402,9 @@ class BottomControls extends StatelessWidget {
           continue;
         }
         if (id == 'watch_together' && controller.isOffline.value) {
+          continue;
+        }
+        if (id == 'torrent' && !controller.isTorrentStream.value) {
           continue;
         }
 
@@ -410,6 +446,19 @@ class BottomControls extends StatelessWidget {
 
     final leftButtons = buildButtonList(leftButtonIds);
     final rightButtons = buildButtonList(rightButtonIds);
+
+    if (controller.isTorrentStream.value &&
+        !leftButtonIds.contains('torrent') &&
+        !rightButtonIds.contains('torrent')) {
+      final torrentBtn = buttonWidgets['torrent'];
+      if (torrentBtn != null) {
+        if (leftButtons.isNotEmpty) {
+          leftButtons.insert(1.clamp(0, leftButtons.length), torrentBtn);
+        } else {
+          leftButtons.add(torrentBtn);
+        }
+      }
+    }
 
     final isPortrait =
         MediaQuery.orientationOf(context) == Orientation.portrait;

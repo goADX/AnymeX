@@ -28,8 +28,11 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:anymex_extension_runtime_bridge/anymex_extension_runtime_bridge.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:anymex/utils/language.dart';
 import 'package:anymex/utils/background_service_handler.dart';
+import 'package:anymex/controllers/services/torrent/torrent_service.dart';
 import 'package:anymex/widgets/non_widgets/snackbar.dart';
+import 'package:anymex/utils/notification.dart';
 
 class DownloadController extends GetxController {
   final RxList<ActiveDownloadTask> activeTasks = <ActiveDownloadTask>[].obs;
@@ -44,6 +47,71 @@ class DownloadController extends GetxController {
   final RxMap<String, DownloadedMangaMeta> mangaMetaCache =
       <String, DownloadedMangaMeta>{}.obs;
 
+  final RxMap<String, double> taskSpeedBytesPerSec = <String, double>{}.obs;
+  final Map<String, DateTime> _lastSpeedTimestamp = {};
+  final Map<String, double> _lastSpeedProgress = {};
+  final Map<String, int> _lastSpeedBytes = {};
+
+  void _updateSpeed(String taskId, double progress,
+      {int? bytes, required bool isManga}) {
+    final now = DateTime.now();
+    final lastTime = _lastSpeedTimestamp[taskId];
+    final lastProg = _lastSpeedProgress[taskId];
+    final lastBytes = _lastSpeedBytes[taskId];
+
+    _lastSpeedTimestamp[taskId] = now;
+    _lastSpeedProgress[taskId] = progress;
+    if (bytes != null) {
+      _lastSpeedBytes[taskId] = bytes;
+    }
+
+    if (lastTime == null) return;
+    final dtMs = now.difference(lastTime).inMilliseconds;
+    if (dtMs < 80) return;
+    final dtSec = dtMs / 1000.0;
+
+    double instantSpeed = 0.0;
+    if (bytes != null && lastBytes != null && bytes >= lastBytes) {
+      instantSpeed = (bytes - lastBytes) / dtSec;
+    } else if (lastProg != null && progress > lastProg) {
+      final estimatedTotal =
+          isManga ? (30.0 * 1024 * 1024) : (180.0 * 1024 * 1024);
+      instantSpeed = ((progress - lastProg) * estimatedTotal) / dtSec;
+    }
+
+    final currentSpeed = taskSpeedBytesPerSec[taskId] ?? 0.0;
+    final smoothed = currentSpeed == 0.0
+        ? instantSpeed
+        : (0.65 * instantSpeed + 0.35 * currentSpeed);
+    taskSpeedBytesPerSec[taskId] = smoothed;
+  }
+
+  void _clearSpeed(String taskId) {
+    taskSpeedBytesPerSec[taskId] = 0.0;
+    _lastSpeedTimestamp.remove(taskId);
+    _lastSpeedProgress.remove(taskId);
+    _lastSpeedBytes.remove(taskId);
+  }
+
+  double getTaskSpeed(String taskId) {
+    final last = _lastSpeedTimestamp[taskId];
+    if (last == null || DateTime.now().difference(last).inSeconds > 3) {
+      return 0.0;
+    }
+    return taskSpeedBytesPerSec[taskId] ?? 0.0;
+  }
+
+  static String formatSpeed(double bytesPerSec) {
+    if (bytesPerSec <= 0) return '0 KB/s';
+    if (bytesPerSec < 1024) {
+      return '${bytesPerSec.toStringAsFixed(0)} B/s';
+    } else if (bytesPerSec < 1024 * 1024) {
+      return '${(bytesPerSec / 1024).toStringAsFixed(1)} KB/s';
+    } else {
+      return '${(bytesPerSec / (1024 * 1024)).toStringAsFixed(2)} MB/s';
+    }
+  }
+
   String _cacheKey(String ext, String title) =>
       '${MediaDownloader.sanitizePathSegment(ext).toLowerCase()}_${MediaDownloader.sanitizePathSegment(title).toLowerCase()}';
 
@@ -53,7 +121,17 @@ class DownloadController extends GetxController {
     if (mediaMetaCache.containsKey(key)) {
       return mediaMetaCache[key];
     }
-    return getMediaMeta(ext, title);
+    final unifiedKey = _cacheKey('AnymeX', title);
+    if (mediaMetaCache.containsKey(unifiedKey)) {
+      return mediaMetaCache[unifiedKey];
+    }
+    final sTitle = MediaDownloader.sanitizePathSegment(title).toLowerCase();
+    for (final entry in mediaMetaCache.entries) {
+      if (entry.key.endsWith('_$sTitle') && entry.value.episodes.isNotEmpty) {
+        return entry.value;
+      }
+    }
+    return await getMediaMeta(ext, title);
   }
 
   Future<DownloadedMangaMeta?> ensureMangaMetaLoaded(
@@ -62,7 +140,17 @@ class DownloadController extends GetxController {
     if (mangaMetaCache.containsKey(key)) {
       return mangaMetaCache[key];
     }
-    return getMangaMeta(ext, title);
+    final unifiedKey = _cacheKey('AnymeX', title);
+    if (mangaMetaCache.containsKey(unifiedKey)) {
+      return mangaMetaCache[unifiedKey];
+    }
+    final sTitle = MediaDownloader.sanitizePathSegment(title).toLowerCase();
+    for (final entry in mangaMetaCache.entries) {
+      if (entry.key.endsWith('_$sTitle') && entry.value.chapters.isNotEmpty) {
+        return entry.value;
+      }
+    }
+    return await getMangaMeta(ext, title);
   }
 
   DownloadItemState getEpisodeState(
@@ -149,10 +237,8 @@ class DownloadController extends GetxController {
     String epNumber,
     Map<String, String> sortMap,
   ) {
-    final key = _cacheKey(ext, title);
-    final meta = mediaMetaCache[key];
-    if (meta == null) return false;
-    return meta.episodes.any(
+    final eps = getDownloadedEpisodes(ext, title);
+    return eps.any(
       (e) => e.number == epNumber && _mapsEqual(e.sortMap, sortMap),
     );
   }
@@ -162,10 +248,40 @@ class DownloadController extends GetxController {
     String title,
     double? chapterNum,
   ) {
-    final key = _cacheKey(ext, title);
-    final meta = mangaMetaCache[key];
-    if (meta == null) return false;
-    return meta.chapters.any((c) => c.chapter.number == chapterNum);
+    final chs = getDownloadedChapters(ext, title);
+    return chs.any((c) => c.chapter.number == chapterNum);
+  }
+
+  static Source? findMatchingSource(
+      List<Source> sources, String extensionName) {
+    for (final s in sources) {
+      final formatted = (s.lang ?? '').isNotEmpty
+          ? '${s.name ?? ''} (${completeLanguageName(s.lang!)})'
+          : (s.name ?? '');
+      if (MediaDownloader.sanitizePathSegment(formatted).toLowerCase() ==
+          extensionName.toLowerCase()) {
+        return s;
+      }
+    }
+    for (final s in sources) {
+      final codeFormat = (s.lang ?? '').isNotEmpty
+          ? '${s.name ?? ''} (${s.lang})'
+          : (s.name ?? '');
+      if (MediaDownloader.sanitizePathSegment(codeFormat).toLowerCase() ==
+          extensionName.toLowerCase()) {
+        return s;
+      }
+    }
+    for (final s in sources) {
+      if (MediaDownloader.sanitizePathSegment(s.name ?? '').toLowerCase() ==
+          extensionName.toLowerCase()) {
+        return s;
+      }
+    }
+    return sources.firstWhereOrNull((s) => extensionName
+        .toLowerCase()
+        .startsWith(
+            MediaDownloader.sanitizePathSegment(s.name ?? '').toLowerCase()));
   }
 
   ActiveDownloadTask? getActiveEpisodeTask({
@@ -174,12 +290,13 @@ class DownloadController extends GetxController {
     required String epNumber,
     required Map<String, String> sortMap,
   }) {
-    final sExt = MediaDownloader.sanitizePathSegment(ext);
-    final sTitle = MediaDownloader.sanitizePathSegment(title);
+    final sExt = MediaDownloader.sanitizePathSegment(ext).toLowerCase();
+    final sTitle = MediaDownloader.sanitizePathSegment(title).toLowerCase();
     return activeTasks.firstWhereOrNull(
       (t) =>
-          t.mediaTitle.toLowerCase() == sTitle.toLowerCase() &&
-          t.extensionName.toLowerCase() == sExt.toLowerCase() &&
+          t.mediaTitle.toLowerCase() == sTitle &&
+          (t.extensionName.toLowerCase() == sExt ||
+              t.extensionName.toLowerCase() == 'anymex') &&
           t.episode.number == epNumber &&
           _mapsEqual(t.episode.sortMap, sortMap) &&
           t.status != DownloadStatus.completed &&
@@ -192,12 +309,13 @@ class DownloadController extends GetxController {
     required String title,
     required double? chapterNum,
   }) {
-    final sExt = MediaDownloader.sanitizePathSegment(ext);
-    final sTitle = MediaDownloader.sanitizePathSegment(title);
+    final sExt = MediaDownloader.sanitizePathSegment(ext).toLowerCase();
+    final sTitle = MediaDownloader.sanitizePathSegment(title).toLowerCase();
     return activeMangaTasks.firstWhereOrNull(
       (t) =>
-          t.mediaTitle.toLowerCase() == sTitle.toLowerCase() &&
-          t.extensionName.toLowerCase() == sExt.toLowerCase() &&
+          t.mediaTitle.toLowerCase() == sTitle &&
+          (t.extensionName.toLowerCase() == sExt ||
+              t.extensionName.toLowerCase() == 'anymex') &&
           t.chapter.number == chapterNum &&
           t.status != MangaDownloadStatus.completed &&
           t.status != MangaDownloadStatus.cancelled,
@@ -205,13 +323,35 @@ class DownloadController extends GetxController {
   }
 
   List<DownloadedEpisodeMeta> getDownloadedEpisodes(String ext, String title) {
-    final key = _cacheKey(ext, title);
-    return mediaMetaCache[key]?.episodes ?? [];
+    final direct = mediaMetaCache[_cacheKey(ext, title)]?.episodes;
+    if (direct != null && direct.isNotEmpty) return direct;
+
+    final unified = mediaMetaCache[_cacheKey('AnymeX', title)]?.episodes;
+    if (unified != null && unified.isNotEmpty) return unified;
+
+    final sTitle = MediaDownloader.sanitizePathSegment(title).toLowerCase();
+    for (final entry in mediaMetaCache.entries) {
+      if (entry.key.endsWith('_$sTitle') && entry.value.episodes.isNotEmpty) {
+        return entry.value.episodes;
+      }
+    }
+    return [];
   }
 
   List<DownloadedChapterMeta> getDownloadedChapters(String ext, String title) {
-    final key = _cacheKey(ext, title);
-    return mangaMetaCache[key]?.chapters ?? [];
+    final direct = mangaMetaCache[_cacheKey(ext, title)]?.chapters;
+    if (direct != null && direct.isNotEmpty) return direct;
+
+    final unified = mangaMetaCache[_cacheKey('AnymeX', title)]?.chapters;
+    if (unified != null && unified.isNotEmpty) return unified;
+
+    final sTitle = MediaDownloader.sanitizePathSegment(title).toLowerCase();
+    for (final entry in mangaMetaCache.entries) {
+      if (entry.key.endsWith('_$sTitle') && entry.value.chapters.isNotEmpty) {
+        return entry.value.chapters;
+      }
+    }
+    return [];
   }
 
   static OfflineMedia createOfflineMediaFromTracker(Media media) {
@@ -222,7 +362,7 @@ class DownloadController extends GetxController {
   final Queue<_MangaScrapeRequest> _mangaScrapeQueue = Queue();
   final Map<String, String> _scrapeTokens = {};
   int _activeTaskCount = 0;
-  bool _isFetching = false;   
+  bool _isFetching = false;
   final List<String> _activeFileTasks = [];
   SendPort? _bgSendPort;
 
@@ -266,7 +406,7 @@ class DownloadController extends GetxController {
       if (Platform.isAndroid || Platform.isIOS) {
         isRunning = await FlutterForegroundTask.isRunningService;
       }
-      
+
       if (!isRunning) {
         for (final task in activeTasks) {
           if (task.status == DownloadStatus.downloading ||
@@ -277,8 +417,8 @@ class DownloadController extends GetxController {
         for (final task in activeMangaTasks) {
           if (task.status == MangaDownloadStatus.downloading ||
               task.status == MangaDownloadStatus.queued) {
-            final source = sourceController.installedMangaExtensions
-                .firstWhereOrNull((s) => s.name == task.extensionName);
+            final source = findMatchingSource(
+                sourceController.installedMangaExtensions, task.extensionName);
             if (source != null) {
               _runChapterDownload(task: task, source: source);
             }
@@ -364,16 +504,21 @@ class DownloadController extends GetxController {
 
             if (statusStr == 'downloading') {
               task.status = DownloadStatus.downloading;
+              _updateSpeed(taskId, prog,
+                  bytes: payload['bytes'] as int?, isManga: false);
             } else if (statusStr == 'completed') {
               task.status = DownloadStatus.completed;
               task.filePath = payload['filePath'] as String?;
+              _clearSpeed(taskId);
             } else if (statusStr == 'failed') {
               task.status = DownloadStatus.failed;
               task.errorMessage = payload['errorMessage'] as String?;
+              _clearSpeed(taskId);
             }
             task.progress = prog;
 
             if (isTerminal) {
+              _clearSpeed(taskId);
               _lastProgressUpdate.remove(taskId);
               activeTasks.refresh();
               _saveActiveTasks();
@@ -405,14 +550,19 @@ class DownloadController extends GetxController {
 
             if (statusStr == 'downloading') {
               task.status = MangaDownloadStatus.downloading;
+              _updateSpeed(taskId, prog,
+                  bytes: payload['bytes'] as int?, isManga: true);
             } else if (statusStr == 'completed') {
               task.status = MangaDownloadStatus.completed;
+              _clearSpeed(taskId);
             } else if (statusStr == 'failed') {
               task.status = MangaDownloadStatus.failed;
+              _clearSpeed(taskId);
             }
             task.progress = prog;
 
             if (isTerminal) {
+              _clearSpeed(taskId);
               _lastProgressUpdate.remove(taskId);
               activeMangaTasks.refresh();
               _saveMangaActiveTasks();
@@ -455,6 +605,14 @@ class DownloadController extends GetxController {
     );
     await _writeEpisodeMeta(task, fileName);
     await _loadIndex();
+    _notifyDownloadComplete(
+      title: task.mediaTitle,
+      subtitle: 'Episode ${task.episode.number}',
+      posterUrl: task.media?.poster ?? task.media?.cover,
+      isManga: false,
+      mediaId: task.media?.id.toString(),
+      episodeOrChapter: task.episode.number,
+    );
   }
 
   Future<void> _onForegroundMangaTaskFinished(
@@ -465,6 +623,41 @@ class DownloadController extends GetxController {
         mediaDir, MediaDownloader.sanitizePathSegment(task.chapterDisplay)));
     await _writeChapterMeta(task, chapterDir.path, pageCount);
     await _loadIndex();
+    _notifyDownloadComplete(
+      title: task.mediaTitle,
+      subtitle: task.chapterDisplay,
+      posterUrl: task.media?.poster ?? task.media?.cover,
+      isManga: true,
+      mediaId: task.media?.id.toString(),
+      episodeOrChapter: task.chapter.number?.toString(),
+    );
+  }
+
+  void _notifyDownloadComplete({
+    required String title,
+    required String subtitle,
+    String? posterUrl,
+    required bool isManga,
+    String? mediaId,
+    String? episodeOrChapter,
+  }) {
+    final enabled = KvHelper.get<bool>('download_notifications_enabled',
+        defaultVal: true);
+    if (!enabled) return;
+    NotificationService.instance.showRichNotification(
+      id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      title: 'Download Completed',
+      body: '$title - $subtitle',
+      imageUrl: posterUrl,
+      channelId: 'downloads',
+      payload: jsonEncode({
+        'type': 'download_complete',
+        'is_manga': isManga,
+        'media_id': mediaId,
+        'title': title,
+        'number': episodeOrChapter,
+      }),
+    );
   }
 
   final List<String> _pendingPayloads = [];
@@ -490,6 +683,14 @@ class DownloadController extends GetxController {
     await _writeEpisodeMeta(task, fileName);
     await _loadIndex();
     _saveActiveTasks();
+    _notifyDownloadComplete(
+      title: task.mediaTitle,
+      subtitle: 'Episode ${task.episode.number}',
+      posterUrl: task.media?.poster ?? task.media?.cover,
+      isManga: false,
+      mediaId: task.media?.id.toString(),
+      episodeOrChapter: task.episode.number,
+    );
   }
 
   Future<void> _saveActiveTasks() async {
@@ -532,6 +733,11 @@ class DownloadController extends GetxController {
 
       final raw = jsonDecode(await file.readAsString()) as List;
       final tasks = raw.map((e) => ActiveDownloadTask.fromJson(e)).toList();
+      for (final t in tasks) {
+        if (t.media?.mediaId != null && t.media!.mediaId!.isNotEmpty) {
+          t.extensionName = 'AnymeX';
+        }
+      }
       activeTasks.addAll(tasks);
     } catch (e) {
       debugPrint(e.toString());
@@ -547,6 +753,11 @@ class DownloadController extends GetxController {
       final raw = jsonDecode(await file.readAsString()) as List;
       final tasks =
           raw.map((e) => ActiveMangaDownloadTask.fromJson(e)).toList();
+      for (final t in tasks) {
+        if (t.media?.mediaId != null && t.media!.mediaId!.isNotEmpty) {
+          t.extensionName = 'AnymeX';
+        }
+      }
       activeMangaTasks.addAll(tasks);
     } catch (e) {
       debugPrint(e.toString());
@@ -554,7 +765,9 @@ class DownloadController extends GetxController {
   }
 
   Future<List<hive.Video>> fetchServersForEpisode(Source source, Episode ep,
-      {String? passedToken, String? preferredQuality, Duration timeout = const Duration(seconds: 20)}) async {
+      {String? passedToken,
+      String? preferredQuality,
+      Duration timeout = const Duration(seconds: 20)}) async {
     final deEpisode = DEpisode(
       episodeNumber: ep.number,
       url: ep.link,
@@ -594,10 +807,12 @@ class DownloadController extends GetxController {
       }
       return videos;
     } else {
-      final videoList = await methods.getVideoList(
-        deEpisode,
-        parameters: SourceParams(cancelToken: token),
-      ).timeout(timeout, onTimeout: () => []);
+      final videoList = await methods
+          .getVideoList(
+            deEpisode,
+            parameters: SourceParams(cancelToken: token),
+          )
+          .timeout(timeout, onTimeout: () => []);
       return videoList.map((v) => hive.Video.fromVideo(v)).toList();
     }
   }
@@ -610,11 +825,18 @@ class DownloadController extends GetxController {
     String? firstEpisodeVideoUrl,
     Map<String, String>? firstEpisodeHeaders,
     List<hive.Track>? firstEpisodeSubtitles,
+    bool isFromMetadataPage = true,
   }) async {
     final mediaTitle = media.name ?? 'Unknown';
     final sanitizedTitle = MediaDownloader.sanitizePathSegment(mediaTitle);
-    final sanitizedExt =
-        MediaDownloader.sanitizePathSegment(source.name ?? 'unknown');
+    final isFromMetadata = isFromMetadataPage ||
+        (media.mediaId != null && media.mediaId!.isNotEmpty);
+    final extName = isFromMetadata
+        ? 'AnymeX'
+        : ((source.lang ?? '').isNotEmpty
+            ? '${source.name ?? 'unknown'} (${completeLanguageName(source.lang!)})'
+            : (source.name ?? 'unknown'));
+    final sanitizedExt = MediaDownloader.sanitizePathSegment(extName);
 
     await setMediaMeta(sanitizedExt, sanitizedTitle, media, mediaType: 'Anime');
 
@@ -719,6 +941,7 @@ class DownloadController extends GetxController {
     if (task.status == DownloadStatus.paused) return;
     if (task.status == DownloadStatus.awaitingServerSelection) return;
 
+    String? torrentHash;
     try {
       hive.Video? chosenVideo;
       if (task.videoUrl.isEmpty) {
@@ -762,7 +985,7 @@ class DownloadController extends GetxController {
           activeTasks.refresh();
           _saveActiveTasks();
           _activeTaskCount--;
-          _processScrapeQueue(); 
+          _processScrapeQueue();
           return;
         }
 
@@ -779,7 +1002,7 @@ class DownloadController extends GetxController {
           activeTasks.refresh();
           _saveActiveTasks();
           _activeTaskCount--;
-          _processScrapeQueue(); 
+          _processScrapeQueue();
           return;
         }
 
@@ -791,8 +1014,6 @@ class DownloadController extends GetxController {
         task.subtitles ??= chosenVideo.subtitles;
       }
 
-      final linkType = detectLinkType(task.videoUrl);
-
       if (task.videoUrl.isEmpty) {
         task.status = DownloadStatus.failed;
         task.errorMessage = 'Empty video URL';
@@ -800,6 +1021,25 @@ class DownloadController extends GetxController {
         _activeTaskCount--;
         return;
       }
+
+      if (isTorrentUrl(task.videoUrl)) {
+        final torrAddon = await TorrentService.instance.acquireDownload();
+        final info = await torrAddon.addForDownload(
+          url: task.videoUrl,
+          title: task.mediaTitle,
+        );
+        torrentHash = info.hash;
+        final file = TorrentService.pickStreamableFile(
+          info,
+          episode: task.episode.number,
+        );
+        if (file == null) {
+          throw Exception('No streamable video file found in torrent');
+        }
+        task.videoUrl = torrAddon.fileUrl(info.hash, file.id).toString();
+      }
+
+      final linkType = detectLinkType(task.videoUrl);
 
       task.status = DownloadStatus.downloading;
       activeTasks.refresh();
@@ -815,7 +1055,11 @@ class DownloadController extends GetxController {
       );
 
       final rootDir = await _getRootDir();
-      final subDir = p.join('Anime', task.extensionName, task.mediaTitle);
+      final subDir = p.join(
+        'Anime',
+        MediaDownloader.sanitizePathSegment(task.extensionName),
+        MediaDownloader.sanitizePathSegment(task.mediaTitle),
+      );
       final fullDirPath = p.join(rootDir.path, subDir);
 
       final mDownloader = MediaDownloader(
@@ -839,11 +1083,13 @@ class DownloadController extends GetxController {
         episodeNumber: task.episode.number,
       );
 
-      final subFolder = p.join(fullDirPath, 'Episode_${task.episode.number}_subs');
+      final subFolder =
+          p.join(fullDirPath, 'Episode_${task.episode.number}_subs');
       final localSubs = task.subtitles?.map((s) {
         final ext = MediaDownloader.getSubtitleExtension(s.file ?? '');
+        final safeName = MediaDownloader.sanitizePathSegment('${s.label}$ext');
         return hive.Track(
-          file: p.join(subFolder, '${s.label}$ext'),
+          file: p.join(subFolder, safeName),
           label: s.label,
         );
       }).toList();
@@ -854,6 +1100,8 @@ class DownloadController extends GetxController {
       await mDownloader.download((progress) {
         task.progress = progress.completed / progress.total;
         task.status = DownloadStatus.downloading;
+        _updateSpeed(task.taskId, task.progress,
+            bytes: progress.bytes, isManga: false);
         final now = DateTime.now();
         final last = _lastProgressUpdate[task.taskId];
         if (last == null ||
@@ -864,6 +1112,7 @@ class DownloadController extends GetxController {
         }
       });
 
+      _clearSpeed(task.taskId);
       _lastProgressUpdate.remove(task.taskId);
       task.status = DownloadStatus.completed;
       task.filePath = p.join(fullDirPath, fileName);
@@ -881,6 +1130,9 @@ class DownloadController extends GetxController {
       _activeTaskCount--;
       _processScrapeQueue();
     } finally {
+      if (torrentHash != null) {
+        await TorrentService.instance.releaseDownload(torrentHash);
+      }
       activeTasks.refresh();
       _saveActiveTasks();
     }
@@ -897,32 +1149,46 @@ class DownloadController extends GetxController {
             t.status == DownloadStatus.awaitingServerSelection)
         .length;
     if (downloading.isEmpty && queued == 0) {
-      _sendToBackground({'type': 'UPDATE_NOTIFICATION', 'title': 'AnymeX Downloads', 'text': 'All downloads complete.'});
+      _sendToBackground({
+        'type': 'UPDATE_NOTIFICATION',
+        'title': 'AnymeX Downloads',
+        'text': 'All downloads complete.'
+      });
       return;
     }
     final active = downloading.isNotEmpty ? downloading.first : null;
     final title = active != null
         ? '${active.mediaTitle} · Ep ${active.episode.number}'
         : 'AnymeX Downloads';
-    final pct = active != null
-        ? '${(active.progress * 100).toStringAsFixed(0)}%'
-        : '';
+    final pct =
+        active != null ? '${(active.progress * 100).toStringAsFixed(0)}%' : '';
     final text = [
       if (pct.isNotEmpty) pct,
       if (queued > 0) '$queued queued',
     ].join(' · ');
-    _sendToBackground({'type': 'UPDATE_NOTIFICATION', 'title': title, 'text': text.isNotEmpty ? text : 'Downloading…'});
+    _sendToBackground({
+      'type': 'UPDATE_NOTIFICATION',
+      'title': title,
+      'text': text.isNotEmpty ? text : 'Downloading…'
+    });
   }
 
   Future<void> enqueueMangaDownloadBatch({
     required List<Chapter> chapters,
     required Source source,
     required OfflineMedia media,
+    bool isFromMetadataPage = true,
   }) async {
     final mediaTitle = media.name ?? 'Unknown';
     final sanitizedTitle = MediaDownloader.sanitizePathSegment(mediaTitle);
-    final sanitizedExt =
-        MediaDownloader.sanitizePathSegment(source.name ?? 'unknown');
+    final isFromMetadata = isFromMetadataPage ||
+        (media.mediaId != null && media.mediaId!.isNotEmpty);
+    final extName = isFromMetadata
+        ? 'AnymeX'
+        : ((source.lang ?? '').isNotEmpty
+            ? '${source.name ?? 'unknown'} (${completeLanguageName(source.lang!)})'
+            : (source.name ?? 'unknown'));
+    final sanitizedExt = MediaDownloader.sanitizePathSegment(extName);
 
     await setMediaMeta(sanitizedExt, sanitizedTitle, media, mediaType: 'Manga');
 
@@ -1025,7 +1291,8 @@ class DownloadController extends GetxController {
         final ext = _imageExtension(page.url);
         final idx = pages.indexOf(page);
         final fileName = 'page_${(idx + 1).toString().padLeft(3, '0')}$ext';
-        final Map<String, String> rawHeaders = page.headers?.map((k, v) => MapEntry(k, v.toString())) ?? {};
+        final Map<String, String> rawHeaders =
+            page.headers?.map((k, v) => MapEntry(k, v.toString())) ?? {};
         final headers = getPageImageHeaders(rawHeaders, source.baseUrl);
         return dl.PageUrl(
           url: page.url,
@@ -1038,11 +1305,13 @@ class DownloadController extends GetxController {
         taskId: task.taskId,
         itemType: ItemType.manga,
         pageUrls: pageUrls,
-        concurrentDownloads: 3, 
+        concurrentDownloads: 3,
       );
 
       await mDownloader.download((progress) {
         task.progress = progress.completed / progress.total;
+        _updateSpeed(task.taskId, task.progress,
+            bytes: progress.bytes, isManga: true);
         final now = DateTime.now();
         final last = _lastProgressUpdate[task.taskId];
         if (last == null ||
@@ -1052,6 +1321,7 @@ class DownloadController extends GetxController {
         }
       });
 
+      _clearSpeed(task.taskId);
       _lastProgressUpdate.remove(task.taskId);
       task.status = MangaDownloadStatus.completed;
       task.progress = 1.0;
@@ -1104,9 +1374,10 @@ class DownloadController extends GetxController {
         DownloadedChapterMeta(
           chapter: task.chapter
             ..localPath = imageDir
-            ..link = (task.chapter.link != null && task.chapter.link!.isNotEmpty)
-                ? task.chapter.link
-                : imageDir,
+            ..link =
+                (task.chapter.link != null && task.chapter.link!.isNotEmpty)
+                    ? task.chapter.link
+                    : imageDir,
           imageDir: imageDir,
           pageCount: pageCount,
           downloadedAt: DateTime.now().millisecondsSinceEpoch,
@@ -1126,6 +1397,8 @@ class DownloadController extends GetxController {
   }
 
   Future<void> cancelMangaDownload(String taskId) async {
+    _clearSpeed(taskId);
+    dl.DownloadIsolatePool.instance.cancelTask(taskId);
     final task = activeMangaTasks.firstWhereOrNull((t) => t.taskId == taskId);
     if (task != null) {
       task.status = MangaDownloadStatus.cancelled;
@@ -1147,15 +1420,30 @@ class DownloadController extends GetxController {
   }
 
   Future<void> removeMangaTask(String taskId) async {
+    _clearSpeed(taskId);
+    dl.DownloadIsolatePool.instance.cancelTask(taskId);
     activeMangaTasks.removeWhere((t) => t.taskId == taskId);
     _saveMangaActiveTasks();
   }
 
   Future<DownloadedMangaMeta?> getMangaMeta(String ext, String title) async {
-    final mediaDir = await _getMangaMediaDirPath(title, ext);
+    final root = await _getRootDir();
+    final sExt = MediaDownloader.sanitizePathSegment(ext);
+    final sTitle = MediaDownloader.sanitizePathSegment(title);
+    var mediaDir = p.join(root.path, 'Manga', sExt, sTitle);
+    var targetExt = ext;
+    if (!await Directory(mediaDir).exists()) {
+      final unifiedDir = p.join(root.path, 'Manga', 'AnymeX', sTitle);
+      if (await Directory(unifiedDir).exists()) {
+        mediaDir = unifiedDir;
+        targetExt = 'AnymeX';
+      } else {
+        return null;
+      }
+    }
     await _syncMediaFolderMeta(
       mediaDir: mediaDir,
-      ext: ext,
+      ext: targetExt,
       title: title,
       mediaType: 'Manga',
     );
@@ -1164,11 +1452,12 @@ class DownloadController extends GetxController {
     final raw =
         jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
     final result = DownloadedMangaMeta.fromJson(raw);
-    mangaMetaCache[_cacheKey(ext, title)] = result;
+    mangaMetaCache[_cacheKey(targetExt, title)] = result;
     return result;
   }
 
   Future<void> pauseDownload(String taskId) async {
+    _clearSpeed(taskId);
     final task = activeTasks.firstWhereOrNull((t) => t.taskId == taskId);
     final mangaTask =
         activeMangaTasks.firstWhereOrNull((t) => t.taskId == taskId);
@@ -1199,9 +1488,9 @@ class DownloadController extends GetxController {
     } else if (mangaTask != null) {
       mangaTask.status = MangaDownloadStatus.queued;
       activeMangaTasks.refresh();
-      final source = Get.find<SourceController>()
-          .installedMangaExtensions
-          .firstWhereOrNull((s) => s.name == mangaTask.extensionName);
+      final source = findMatchingSource(
+          Get.find<SourceController>().installedMangaExtensions,
+          mangaTask.extensionName);
       if (source != null) {
         _runChapterDownload(task: mangaTask, source: source);
       }
@@ -1212,6 +1501,7 @@ class DownloadController extends GetxController {
   }
 
   Future<void> cancelDownload(String taskId) async {
+    _clearSpeed(taskId);
     dl.DownloadIsolatePool.instance.cancelTask(taskId);
 
     bool isRunning = false;
@@ -1231,13 +1521,12 @@ class DownloadController extends GetxController {
       final taskInActive =
           activeTasks.firstWhereOrNull((t) => t.taskId == taskId);
       if (taskInActive != null) {
-        final source = Get.find<SourceController>()
-                .installedExtensions
-                .firstWhereOrNull(
-                    (s) => s.name == taskInActive.extensionName) ??
-            Get.find<SourceController>()
-                .installedMangaExtensions
-                .firstWhereOrNull((s) => s.name == taskInActive.extensionName);
+        final source = findMatchingSource(
+                Get.find<SourceController>().installedExtensions,
+                taskInActive.extensionName) ??
+            findMatchingSource(
+                Get.find<SourceController>().installedMangaExtensions,
+                taskInActive.extensionName);
         source?.cancelRequest(token);
       }
       _scrapeTokens.remove(taskId);
@@ -1250,7 +1539,78 @@ class DownloadController extends GetxController {
     }
   }
 
+  Future<void> cancelAndRemoveTasks(List<String> taskIds,
+      {required bool isManga}) async {
+    for (final id in taskIds) {
+      _clearSpeed(id);
+      dl.DownloadIsolatePool.instance.cancelTask(id);
+    }
+
+    bool isRunning = false;
+    if (Platform.isAndroid || Platform.isIOS) {
+      isRunning = await FlutterForegroundTask.isRunningService;
+    }
+
+    if (isRunning) {
+      for (final id in taskIds) {
+        _sendToBackground({
+          'type': 'CANCEL_TASK',
+          'taskId': id,
+        });
+      }
+    }
+
+    if (!isManga) {
+      for (final id in taskIds) {
+        final token = _scrapeTokens[id];
+        if (token != null) {
+          final taskInActive =
+              activeTasks.firstWhereOrNull((t) => t.taskId == id);
+          if (taskInActive != null) {
+            final source = findMatchingSource(
+                    Get.find<SourceController>().installedExtensions,
+                    taskInActive.extensionName) ??
+                findMatchingSource(
+                    Get.find<SourceController>().installedMangaExtensions,
+                    taskInActive.extensionName);
+            source?.cancelRequest(token);
+          }
+          _scrapeTokens.remove(id);
+        }
+      }
+      activeTasks.removeWhere((t) => taskIds.contains(t.taskId));
+      _saveActiveTasks();
+      _updateNotification();
+    } else {
+      activeMangaTasks.removeWhere((t) => taskIds.contains(t.taskId));
+      _saveMangaActiveTasks();
+    }
+
+    try {
+      final rootDir = await _getRootDir();
+      final animeDir = Directory(p.join(rootDir.path, 'Anime'));
+      if (await animeDir.exists()) {
+        await for (final entity
+            in animeDir.list(recursive: true, followLinks: false)) {
+          if (entity is Directory) {
+            final name = p.basename(entity.path);
+            if (name.startsWith('temp_')) {
+              final tempTaskId = name.substring(5);
+              if (taskIds.contains(tempTaskId)) {
+                try {
+                  await entity.delete(recursive: true);
+                } catch (_) {}
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
   Future<void> removeTask(String taskId) async {
+    _clearSpeed(taskId);
+    dl.DownloadIsolatePool.instance.cancelTask(taskId);
     activeTasks.removeWhere((t) => t.taskId == taskId);
     _saveActiveTasks();
   }
@@ -1273,15 +1633,18 @@ class DownloadController extends GetxController {
   }
 
   Future<String> _getMediaDirPath(String title, String sourceName,
-      {String mediaType = 'Anime'}) async {
+      {String mediaType = 'Anime', bool create = true}) async {
     final root = await _getRootDir();
-    final dir = Directory(p.join(root.path, mediaType, sourceName, title));
-    if (!await dir.exists()) await dir.create(recursive: true);
+    final sExt = MediaDownloader.sanitizePathSegment(sourceName);
+    final sTitle = MediaDownloader.sanitizePathSegment(title);
+    final dir = Directory(p.join(root.path, mediaType, sExt, sTitle));
+    if (create && !await dir.exists()) await dir.create(recursive: true);
     return dir.path;
   }
 
-  Future<String> _getMangaMediaDirPath(String title, String sourceName) =>
-      _getMediaDirPath(title, sourceName, mediaType: 'Manga');
+  Future<String> _getMangaMediaDirPath(String title, String sourceName,
+          {bool create = true}) =>
+      _getMediaDirPath(title, sourceName, mediaType: 'Manga', create: create);
 
   Future<void> _writeEpisodeMeta(
       ActiveDownloadTask task, String fileName) async {
@@ -1477,8 +1840,8 @@ class DownloadController extends GetxController {
           jsonDecode(await indexFile.readAsString()) as Map<String, dynamic>;
       final itemsRaw = raw['items'] as List<dynamic>? ?? [];
       final items = itemsRaw
-          .map((e) =>
-              DownloadedMediaSummary.fromJson(e as Map<String, dynamic>))
+          .map(
+              (e) => DownloadedMediaSummary.fromJson(e as Map<String, dynamic>))
           .toList();
 
       final index = items.indexWhere((i) => i.folderName == folderName);
@@ -1520,7 +1883,8 @@ class DownloadController extends GetxController {
     try {
       final dir = Directory(dirPath);
       if (!await dir.exists()) return;
-      await for (final entity in dir.list(recursive: true, followLinks: false)) {
+      await for (final entity
+          in dir.list(recursive: true, followLinks: false)) {
         if (entity is Directory) {
           final isTemp = p.basename(entity.path).startsWith('temp_');
           bool hasTs = false;
@@ -1550,6 +1914,319 @@ class DownloadController extends GetxController {
     }
   }
 
+  Future<void> _safeMoveFile(File source, String targetPath) async {
+    try {
+      await source.rename(targetPath);
+    } catch (_) {
+      await source.copy(targetPath);
+      await source.delete();
+    }
+  }
+
+  Future<void> _safeMoveDir(Directory source, String targetPath) async {
+    try {
+      await source.rename(targetPath);
+    } catch (_) {
+      final target = Directory(targetPath);
+      if (!await target.exists()) await target.create(recursive: true);
+      await for (final entity in source.list(recursive: false)) {
+        final newPath = p.join(targetPath, p.basename(entity.path));
+        if (entity is File) {
+          await _safeMoveFile(entity, newPath);
+        } else if (entity is Directory) {
+          await _safeMoveDir(entity, newPath);
+        }
+      }
+      await source.delete(recursive: true);
+    }
+  }
+
+  Future<void> _consolidateDownloads() async {
+    try {
+      final root = await _getRootDir();
+      if (!await root.exists()) return;
+
+      for (final type in ['Anime', 'Manga']) {
+        final typeDir = Directory(p.join(root.path, type));
+        if (!await typeDir.exists()) continue;
+
+        final extEntities = await typeDir.list().toList();
+        final extDirs = extEntities.whereType<Directory>().toList();
+
+        for (final extDir in extDirs) {
+          final extName = p.basename(extDir.path);
+          if (extName == 'AnymeX') continue;
+
+          final mediaEntities = await extDir.list().toList();
+          final mediaDirs = mediaEntities.whereType<Directory>().toList();
+
+          for (final mediaDir in mediaDirs) {
+            final folderName = p.basename(mediaDir.path);
+            final metaFile = File(p.join(mediaDir.path, 'metadata.json'));
+            bool isMetadataMedia = false;
+
+            if (await metaFile.exists()) {
+              try {
+                final raw = jsonDecode(await metaFile.readAsString())
+                    as Map<String, dynamic>;
+                final mediaRaw = raw['media'] as Map<String, dynamic>?;
+                final mediaId = mediaRaw?['mediaId'] as String?;
+                if (mediaId != null && mediaId.trim().isNotEmpty) {
+                  isMetadataMedia = true;
+                }
+              } catch (_) {}
+            }
+
+            final unifiedDir =
+                Directory(p.join(root.path, type, 'AnymeX', folderName));
+            final hasUnified = await unifiedDir.exists();
+
+            bool hasMatchingFolderInOtherExt = false;
+            for (final otherExtDir in extDirs) {
+              if (otherExtDir.path == extDir.path) continue;
+              final matchingDir =
+                  Directory(p.join(otherExtDir.path, folderName));
+              if (await matchingDir.exists()) {
+                hasMatchingFolderInOtherExt = true;
+                break;
+              }
+            }
+
+            if (isMetadataMedia || hasUnified || hasMatchingFolderInOtherExt) {
+              await _mergeMediaDirectory(
+                sourceDir: mediaDir,
+                sourceExt: extName,
+                targetDir: unifiedDir,
+                targetExt: 'AnymeX',
+                folderName: folderName,
+                mediaType: type,
+              );
+            }
+          }
+
+          if (await extDir.list().isEmpty) {
+            try {
+              await extDir.delete();
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('DownloadController: error consolidating downloads: $e');
+    }
+  }
+
+  Future<void> _mergeMediaDirectory({
+    required Directory sourceDir,
+    required String sourceExt,
+    required Directory targetDir,
+    required String targetExt,
+    required String folderName,
+    required String mediaType,
+  }) async {
+    try {
+      if (!await targetDir.exists()) await targetDir.create(recursive: true);
+
+      if (mediaType == 'Anime') {
+        DownloadedMediaMeta sourceMeta =
+            const DownloadedMediaMeta(episodes: []);
+        final sourceMetaFile = File(p.join(sourceDir.path, 'metadata.json'));
+        if (await sourceMetaFile.exists()) {
+          try {
+            final raw = jsonDecode(await sourceMetaFile.readAsString())
+                as Map<String, dynamic>;
+            sourceMeta = DownloadedMediaMeta.fromJson(raw);
+          } catch (_) {}
+        }
+
+        DownloadedMediaMeta targetMeta =
+            const DownloadedMediaMeta(episodes: []);
+        final targetMetaFile = File(p.join(targetDir.path, 'metadata.json'));
+        if (await targetMetaFile.exists()) {
+          try {
+            final raw = jsonDecode(await targetMetaFile.readAsString())
+                as Map<String, dynamic>;
+            targetMeta = DownloadedMediaMeta.fromJson(raw);
+          } catch (_) {}
+        }
+
+        await for (final entity in sourceDir.list()) {
+          if (entity is File) {
+            final name = p.basename(entity.path);
+            if (name == 'metadata.json') {
+              try {
+                await entity.delete();
+              } catch (_) {}
+              continue;
+            }
+            final ext = p.extension(name).toLowerCase();
+            if ([
+                  '.mp4',
+                  '.mkv',
+                  '.avi',
+                  '.webm',
+                  '.mov',
+                  '.ts',
+                  '.vtt',
+                  '.srt',
+                  '.ass'
+                ].contains(ext) &&
+                !name.startsWith('.')) {
+              final destPath = p.join(targetDir.path, name);
+              final destFile = File(destPath);
+              if (await destFile.exists() && await destFile.length() > 0) {
+                try {
+                  await entity.delete();
+                } catch (_) {}
+              } else {
+                await _safeMoveFile(entity, destPath);
+              }
+            }
+          }
+        }
+
+        final targetEpisodes = <DownloadedEpisodeMeta>[...targetMeta.episodes];
+        for (final ep in sourceMeta.episodes) {
+          final newFilePath = p.join(targetDir.path,
+              ep.fileName.isNotEmpty ? ep.fileName : p.basename(ep.filePath));
+          final exists = targetEpisodes.any((e) =>
+              e.number == ep.number && _mapsEqual(e.sortMap, ep.sortMap));
+          if (!exists) {
+            targetEpisodes.add(DownloadedEpisodeMeta(
+              episode: ep.episode,
+              fileName: ep.fileName.isNotEmpty
+                  ? ep.fileName
+                  : p.basename(newFilePath),
+              downloadedAt: ep.downloadedAt,
+              filePath: newFilePath,
+              quality: ep.quality,
+              subtitles: ep.subtitles,
+            ));
+          }
+        }
+
+        targetEpisodes.sort((a, b) {
+          final aNum = double.tryParse(a.number) ?? 0.0;
+          final bNum = double.tryParse(b.number) ?? 0.0;
+          return aNum.compareTo(bNum);
+        });
+
+        final mergedWatched = {
+          ...targetMeta.watchedProgress,
+          ...sourceMeta.watchedProgress
+        };
+        final mergedMedia = targetMeta.media ?? sourceMeta.media;
+        final updatedTargetMeta = DownloadedMediaMeta(
+          episodes: targetEpisodes,
+          watchedProgress: mergedWatched,
+          media: mergedMedia,
+        );
+
+        await targetMetaFile
+            .writeAsString(jsonEncode(updatedTargetMeta.toJson()), flush: true);
+        mediaMetaCache[_cacheKey(targetExt, folderName)] = updatedTargetMeta;
+        mediaMetaCache.remove(_cacheKey(sourceExt, folderName));
+      } else {
+        DownloadedMangaMeta sourceMeta =
+            const DownloadedMangaMeta(chapters: []);
+        final sourceMetaFile = File(p.join(sourceDir.path, 'metadata.json'));
+        if (await sourceMetaFile.exists()) {
+          try {
+            final raw = jsonDecode(await sourceMetaFile.readAsString())
+                as Map<String, dynamic>;
+            sourceMeta = DownloadedMangaMeta.fromJson(raw);
+          } catch (_) {}
+        }
+
+        DownloadedMangaMeta targetMeta =
+            const DownloadedMangaMeta(chapters: []);
+        final targetMetaFile = File(p.join(targetDir.path, 'metadata.json'));
+        if (await targetMetaFile.exists()) {
+          try {
+            final raw = jsonDecode(await targetMetaFile.readAsString())
+                as Map<String, dynamic>;
+            targetMeta = DownloadedMangaMeta.fromJson(raw);
+          } catch (_) {}
+        }
+
+        await for (final entity in sourceDir.list()) {
+          if (entity is Directory) {
+            final name = p.basename(entity.path);
+            if (!name.startsWith('temp_')) {
+              final destPath = p.join(targetDir.path, name);
+              final destDir = Directory(destPath);
+              if (await destDir.exists()) {
+                await for (final img in entity.list()) {
+                  if (img is File) {
+                    final destImg =
+                        File(p.join(destDir.path, p.basename(img.path)));
+                    if (!await destImg.exists()) {
+                      await _safeMoveFile(img, destImg.path);
+                    }
+                  }
+                }
+                try {
+                  await entity.delete(recursive: true);
+                } catch (_) {}
+              } else {
+                await _safeMoveDir(entity, destPath);
+              }
+            }
+          } else if (entity is File &&
+              p.basename(entity.path) == 'metadata.json') {
+            try {
+              await entity.delete();
+            } catch (_) {}
+          }
+        }
+
+        final targetChapters = <DownloadedChapterMeta>[...targetMeta.chapters];
+        for (final ch in sourceMeta.chapters) {
+          final newImageDir = p.join(targetDir.path, p.basename(ch.imageDir));
+          final exists =
+              targetChapters.any((c) => c.chapter.number == ch.chapter.number);
+          if (!exists) {
+            ch.chapter.localPath = newImageDir;
+            if (ch.chapter.link == null || ch.chapter.link!.isEmpty) {
+              ch.chapter.link = newImageDir;
+            }
+            targetChapters.add(DownloadedChapterMeta(
+              chapter: ch.chapter,
+              imageDir: newImageDir,
+              pageCount: ch.pageCount,
+              downloadedAt: ch.downloadedAt,
+            ));
+          }
+        }
+
+        targetChapters.sort((a, b) {
+          final aNum = a.chapter.number ?? 0.0;
+          final bNum = b.chapter.number ?? 0.0;
+          return aNum.compareTo(bNum);
+        });
+
+        final mergedMedia = targetMeta.media ?? sourceMeta.media;
+        final updatedTargetMeta = DownloadedMangaMeta(
+          chapters: targetChapters,
+          media: mergedMedia,
+        );
+
+        await targetMetaFile
+            .writeAsString(jsonEncode(updatedTargetMeta.toJson()), flush: true);
+        mangaMetaCache[_cacheKey(targetExt, folderName)] = updatedTargetMeta;
+        mangaMetaCache.remove(_cacheKey(sourceExt, folderName));
+      }
+
+      if (await sourceDir.exists()) {
+        try {
+          await sourceDir.delete(recursive: true);
+        } catch (_) {}
+      }
+    } catch (e) {
+      debugPrint('DownloadController: error merging media directory: $e');
+    }
+  }
+
   Future<void> resyncDownloads() async {
     try {
       final root = await _getRootDir();
@@ -1558,18 +2235,21 @@ class DownloadController extends GetxController {
         return;
       }
 
+      await _consolidateDownloads();
+
       final Map<String, DownloadedMediaSummary> summaryMap = {};
       final indexFile = File(p.join(root.path, 'metadata.json'));
       if (await indexFile.exists()) {
         try {
-          final raw =
-              jsonDecode(await indexFile.readAsString()) as Map<String, dynamic>;
+          final raw = jsonDecode(await indexFile.readAsString())
+              as Map<String, dynamic>;
           final itemsRaw = raw['items'] as List<dynamic>? ?? [];
           for (final item in itemsRaw) {
             final summary =
                 DownloadedMediaSummary.fromJson(item as Map<String, dynamic>);
             summaryMap[
-                '${summary.mediaType}_${summary.extensionName}_${summary.folderName}'] = summary;
+                    '${summary.mediaType}_${summary.extensionName}_${summary.folderName}'] =
+                summary;
           }
         } catch (_) {}
       }
@@ -1608,9 +2288,7 @@ class DownloadController extends GetxController {
               final m = cached?.media;
               if (m != null) {
                 if (poster == null || poster.isEmpty) {
-                  poster = (m.poster?.isNotEmpty == true)
-                      ? m.poster
-                      : m.cover;
+                  poster = (m.poster?.isNotEmpty == true) ? m.poster : m.cover;
                 }
                 if (title == folderName && m.name?.isNotEmpty == true) {
                   title = m.name!;
@@ -1622,9 +2300,7 @@ class DownloadController extends GetxController {
               final m = cached?.media;
               if (m != null) {
                 if (poster == null || poster.isEmpty) {
-                  poster = (m.poster?.isNotEmpty == true)
-                      ? m.poster
-                      : m.cover;
+                  poster = (m.poster?.isNotEmpty == true) ? m.poster : m.cover;
                 }
                 if (title == folderName && m.name?.isNotEmpty == true) {
                   title = m.name!;
@@ -1647,7 +2323,8 @@ class DownloadController extends GetxController {
       }
 
       await indexFile.writeAsString(
-        jsonEncode({'items': verifiedSummaries.map((i) => i.toJson()).toList()}),
+        jsonEncode(
+            {'items': verifiedSummaries.map((i) => i.toJson()).toList()}),
         flush: true,
       );
 
@@ -1663,6 +2340,8 @@ class DownloadController extends GetxController {
     required String title,
     required String mediaType,
   }) async {
+    final dir = Directory(mediaDir);
+    if (!await dir.exists()) return false;
     final metaFile = File(p.join(mediaDir, 'metadata.json'));
 
     if (mediaType == 'Anime') {
@@ -1680,13 +2359,38 @@ class DownloadController extends GetxController {
       final existingFilePaths = <String>{};
 
       for (final epMeta in meta.episodes) {
-        final epFilePath = epMeta.filePath.isNotEmpty
+        String epFilePath = epMeta.filePath.isNotEmpty
             ? epMeta.filePath
             : p.join(mediaDir, epMeta.fileName);
-        final file = File(epFilePath);
+        var file = File(epFilePath);
+        if (!await file.exists() || await file.length() == 0) {
+          final fallbackPath = p.join(
+              mediaDir,
+              epMeta.fileName.isNotEmpty
+                  ? epMeta.fileName
+                  : p.basename(epFilePath));
+          final fallbackFile = File(fallbackPath);
+          if (await fallbackFile.exists() && await fallbackFile.length() > 0) {
+            epFilePath = fallbackPath;
+            file = fallbackFile;
+          }
+        }
         if (await file.exists() && await file.length() > 0) {
-          verifiedEpisodes.add(epMeta);
-          if (epMeta.fileName.isNotEmpty) existingFileNames.add(epMeta.fileName);
+          verifiedEpisodes.add(epMeta.filePath == epFilePath
+              ? epMeta
+              : DownloadedEpisodeMeta(
+                  episode: epMeta.episode,
+                  fileName: epMeta.fileName.isNotEmpty
+                      ? epMeta.fileName
+                      : p.basename(epFilePath),
+                  downloadedAt: epMeta.downloadedAt,
+                  filePath: epFilePath,
+                  quality: epMeta.quality,
+                  subtitles: epMeta.subtitles,
+                ));
+          if (epMeta.fileName.isNotEmpty) {
+            existingFileNames.add(epMeta.fileName);
+          }
           existingFilePaths.add(epFilePath);
         }
       }
@@ -1716,7 +2420,8 @@ class DownloadController extends GetxController {
                     sortVals: sortMap.values.toList(),
                   ),
                   fileName: fileName,
-                  downloadedAt: entity.lastModifiedSync().millisecondsSinceEpoch,
+                  downloadedAt:
+                      entity.lastModifiedSync().millisecondsSinceEpoch,
                   filePath: entity.path,
                 );
                 verifiedEpisodes.add(newEp);
@@ -1747,7 +2452,8 @@ class DownloadController extends GetxController {
       mediaMetaCache[_cacheKey(ext, title)] = updatedMeta;
 
       if (verifiedEpisodes.isNotEmpty || hasActiveAnime || meta.media != null) {
-        await metaFile.writeAsString(jsonEncode(updatedMeta.toJson()), flush: true);
+        await metaFile.writeAsString(jsonEncode(updatedMeta.toJson()),
+            flush: true);
         return verifiedEpisodes.isNotEmpty;
       } else {
         if (await metaFile.exists()) await metaFile.delete();
@@ -1768,19 +2474,34 @@ class DownloadController extends GetxController {
       final existingDirs = <String>{};
 
       for (final chMeta in meta.chapters) {
-        final chDir = Directory(chMeta.imageDir);
-        if (await chDir.exists()) {
-          final hasImages = await chDir.list().any((e) =>
+        String chDir = chMeta.imageDir;
+        var dir = Directory(chDir);
+        if (!await dir.exists()) {
+          final fallbackDir = p.join(mediaDir, p.basename(chDir));
+          if (await Directory(fallbackDir).exists()) {
+            chDir = fallbackDir;
+            dir = Directory(fallbackDir);
+          }
+        }
+        if (await dir.exists()) {
+          final hasImages = await dir.list().any((e) =>
               e is File &&
               ['.png', '.jpg', '.jpeg', '.webp']
                   .contains(p.extension(e.path).toLowerCase()));
           if (hasImages) {
-            chMeta.chapter.localPath ??= chMeta.imageDir;
+            chMeta.chapter.localPath = chDir;
             if (chMeta.chapter.link == null || chMeta.chapter.link!.isEmpty) {
-              chMeta.chapter.link = chMeta.imageDir;
+              chMeta.chapter.link = chDir;
             }
-            verifiedChapters.add(chMeta);
-            existingDirs.add(chDir.path);
+            verifiedChapters.add(chMeta.imageDir == chDir
+                ? chMeta
+                : DownloadedChapterMeta(
+                    chapter: chMeta.chapter,
+                    imageDir: chDir,
+                    pageCount: chMeta.pageCount,
+                    downloadedAt: chMeta.downloadedAt,
+                  ));
+            existingDirs.add(chDir);
           }
         }
       }
@@ -1840,7 +2561,8 @@ class DownloadController extends GetxController {
       mangaMetaCache[_cacheKey(ext, title)] = updatedMeta;
 
       if (verifiedChapters.isNotEmpty || hasActiveManga || meta.media != null) {
-        await metaFile.writeAsString(jsonEncode(updatedMeta.toJson()), flush: true);
+        await metaFile.writeAsString(jsonEncode(updatedMeta.toJson()),
+            flush: true);
         return verifiedChapters.isNotEmpty;
       } else {
         if (await metaFile.exists()) await metaFile.delete();
@@ -1852,9 +2574,9 @@ class DownloadController extends GetxController {
 
   String _parseEpisodeNumberFromFileName(String fileName) {
     final nameWithoutExt = p.basenameWithoutExtension(fileName);
-    final matchEp = RegExp(r'(?:EP|Episode[_\s]*)(\d+(?:\.\d+)?)',
-            caseSensitive: false)
-        .firstMatch(nameWithoutExt);
+    final matchEp =
+        RegExp(r'(?:EP|Episode[_\s]*)(\d+(?:\.\d+)?)', caseSensitive: false)
+            .firstMatch(nameWithoutExt);
     if (matchEp != null) {
       return matchEp.group(1)!;
     }
@@ -1888,8 +2610,21 @@ class DownloadController extends GetxController {
     int timestampMs,
     int durationMs,
   ) async {
-    final mediaDir = await _getMediaDirPath(title, ext, mediaType: 'Anime');
-    final metaFile = File(p.join(mediaDir, 'metadata.json'));
+    final root = await _getRootDir();
+    final sExt = MediaDownloader.sanitizePathSegment(ext);
+    final sTitle = MediaDownloader.sanitizePathSegment(title);
+    var targetExt = ext;
+    var mediaDir = p.join(root.path, 'Anime', sExt, sTitle);
+    var metaFile = File(p.join(mediaDir, 'metadata.json'));
+    if (!await metaFile.exists()) {
+      final unifiedDir = p.join(root.path, 'Anime', 'AnymeX', sTitle);
+      final unifiedMeta = File(p.join(unifiedDir, 'metadata.json'));
+      if (await unifiedMeta.exists()) {
+        mediaDir = unifiedDir;
+        metaFile = unifiedMeta;
+        targetExt = 'AnymeX';
+      }
+    }
     if (!await metaFile.exists()) return;
 
     final raw =
@@ -1911,15 +2646,74 @@ class DownloadController extends GetxController {
       media: meta.media,
     );
     await metaFile.writeAsString(jsonEncode(updated.toJson()), flush: true);
-    mediaMetaCache[_cacheKey(ext, title)] = updated;
+    mediaMetaCache[_cacheKey(targetExt, title)] = updated;
     await _loadIndex();
   }
 
+  Future<void> updateChapterProgress(
+    String ext,
+    String title,
+    String chapterNumber,
+    int pageNumber,
+    int totalPages,
+  ) async {
+    final root = await _getRootDir();
+    final sExt = MediaDownloader.sanitizePathSegment(ext);
+    final sTitle = MediaDownloader.sanitizePathSegment(title);
+    var targetExt = ext;
+    var mediaDir = p.join(root.path, 'Manga', sExt, sTitle);
+    var metaFile = File(p.join(mediaDir, 'metadata.json'));
+    if (!await metaFile.exists()) {
+      final unifiedDir = p.join(root.path, 'Manga', 'AnymeX', sTitle);
+      final unifiedMeta = File(p.join(unifiedDir, 'metadata.json'));
+      if (await unifiedMeta.exists()) {
+        mediaDir = unifiedDir;
+        metaFile = unifiedMeta;
+        targetExt = 'AnymeX';
+      }
+    }
+    if (!await metaFile.exists()) return;
+
+    final raw =
+        jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
+    final meta = DownloadedMangaMeta.fromJson(raw);
+
+    final updatedChapters = meta.chapters.map((ch) {
+      final chNum = ch.chapter.number?.toString();
+      if (chNum == chapterNumber) {
+        ch.chapter.pageNumber = pageNumber;
+        ch.chapter.totalPages = totalPages;
+        ch.chapter.lastReadTime = DateTime.now().millisecondsSinceEpoch;
+      }
+      return ch;
+    }).toList();
+
+    final updated = DownloadedMangaMeta(
+      chapters: updatedChapters,
+      media: meta.media,
+    );
+    await metaFile.writeAsString(jsonEncode(updated.toJson()), flush: true);
+    mangaMetaCache[_cacheKey(targetExt, title)] = updated;
+  }
+
   Future<DownloadedMediaMeta?> getMediaMeta(String ext, String title) async {
-    final mediaDir = await _getMediaDirPath(title, ext, mediaType: 'Anime');
+    final root = await _getRootDir();
+    final sExt = MediaDownloader.sanitizePathSegment(ext);
+    final sTitle = MediaDownloader.sanitizePathSegment(title);
+    var mediaDir = p.join(root.path, 'Anime', sExt, sTitle);
+    var targetExt = ext;
+    if (!await Directory(mediaDir).exists()) {
+      final unifiedDir = p.join(root.path, 'Anime', 'AnymeX', sTitle);
+      if (await Directory(unifiedDir).exists()) {
+        mediaDir = unifiedDir;
+        targetExt = 'AnymeX';
+      } else {
+        return null;
+      }
+    }
     await _syncMediaFolderMeta(
       mediaDir: mediaDir,
-      ext: ext,
+      ext: targetExt,
       title: title,
       mediaType: 'Anime',
     );
@@ -1928,25 +2722,54 @@ class DownloadController extends GetxController {
     final raw =
         jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
     final result = DownloadedMediaMeta.fromJson(raw);
-    mediaMetaCache[_cacheKey(ext, title)] = result;
+    mediaMetaCache[_cacheKey(targetExt, title)] = result;
     return result;
   }
 
   Future<void> deleteMedia(String ext, String title,
       {String mediaType = 'Anime'}) async {
-    final mediaDir = await _getMediaDirPath(title, ext, mediaType: mediaType);
-    final dir = Directory(mediaDir);
-    if (await dir.exists()) await dir.delete(recursive: true);
+    final root = await _getRootDir();
+    final sExt = MediaDownloader.sanitizePathSegment(ext);
+    final sTitle = MediaDownloader.sanitizePathSegment(title);
+    final directDir = Directory(p.join(root.path, mediaType, sExt, sTitle));
+    if (await directDir.exists()) {
+      await directDir.delete(recursive: true);
+    }
+    if (sExt != 'AnymeX') {
+      final unifiedDir =
+          Directory(p.join(root.path, mediaType, 'AnymeX', sTitle));
+      if (await unifiedDir.exists()) {
+        await unifiedDir.delete(recursive: true);
+      }
+    }
     mediaMetaCache.remove(_cacheKey(ext, title));
+    mediaMetaCache.remove(_cacheKey('AnymeX', title));
     mangaMetaCache.remove(_cacheKey(ext, title));
+    mangaMetaCache.remove(_cacheKey('AnymeX', title));
     await _removeFromGlobalIndex(ext, title);
+    if (ext != 'AnymeX') {
+      await _removeFromGlobalIndex('AnymeX', title);
+    }
     await _loadIndex();
   }
 
   Future<void> deleteEpisode(String ext, String title, String epNumber,
       Map<String, String> sortMap) async {
-    final mediaDir = await _getMediaDirPath(title, ext, mediaType: 'Anime');
-    final metaFile = File(p.join(mediaDir, 'metadata.json'));
+    final root = await _getRootDir();
+    final sExt = MediaDownloader.sanitizePathSegment(ext);
+    final sTitle = MediaDownloader.sanitizePathSegment(title);
+    var targetExt = ext;
+    var mediaDir = p.join(root.path, 'Anime', sExt, sTitle);
+    var metaFile = File(p.join(mediaDir, 'metadata.json'));
+    if (!await metaFile.exists()) {
+      final unifiedDir = p.join(root.path, 'Anime', 'AnymeX', sTitle);
+      final unifiedMeta = File(p.join(unifiedDir, 'metadata.json'));
+      if (await unifiedMeta.exists()) {
+        mediaDir = unifiedDir;
+        metaFile = unifiedMeta;
+        targetExt = 'AnymeX';
+      }
+    }
     if (!await metaFile.exists()) return;
 
     final raw =
@@ -1971,14 +2794,27 @@ class DownloadController extends GetxController {
       media: meta.media,
     );
     await metaFile.writeAsString(jsonEncode(meta.toJson()), flush: true);
-    mediaMetaCache[_cacheKey(ext, title)] = meta;
+    mediaMetaCache[_cacheKey(targetExt, title)] = meta;
     await _loadIndex();
   }
 
   Future<void> deleteChapter(
       String ext, String title, double? chapterNum) async {
-    final mediaDir = await _getMediaDirPath(title, ext, mediaType: 'Manga');
-    final metaFile = File(p.join(mediaDir, 'metadata.json'));
+    final root = await _getRootDir();
+    final sExt = MediaDownloader.sanitizePathSegment(ext);
+    final sTitle = MediaDownloader.sanitizePathSegment(title);
+    var targetExt = ext;
+    var mediaDir = p.join(root.path, 'Manga', sExt, sTitle);
+    var metaFile = File(p.join(mediaDir, 'metadata.json'));
+    if (!await metaFile.exists()) {
+      final unifiedDir = p.join(root.path, 'Manga', 'AnymeX', sTitle);
+      final unifiedMeta = File(p.join(unifiedDir, 'metadata.json'));
+      if (await unifiedMeta.exists()) {
+        mediaDir = unifiedDir;
+        metaFile = unifiedMeta;
+        targetExt = 'AnymeX';
+      }
+    }
     if (!await metaFile.exists()) return;
 
     final raw =
@@ -2001,7 +2837,7 @@ class DownloadController extends GetxController {
     );
 
     await metaFile.writeAsString(jsonEncode(meta.toJson()), flush: true);
-    mangaMetaCache[_cacheKey(ext, title)] = meta;
+    mangaMetaCache[_cacheKey(targetExt, title)] = meta;
     await _loadIndex();
   }
 
@@ -2014,7 +2850,8 @@ class DownloadController extends GetxController {
         jsonDecode(await indexFile.readAsString()) as Map<String, dynamic>;
     final items = (raw['items'] as List<dynamic>? ?? [])
         .map((e) => e as Map<String, dynamic>)
-        .where((i) => !(i['extensionName'] == ext && i['folderName'] == title))
+        .where((i) => !(i['extensionName'] == ext &&
+            (i['folderName'] == title || i['title'] == title)))
         .toList();
     await indexFile.writeAsString(jsonEncode({'items': items}), flush: true);
   }
@@ -2065,26 +2902,35 @@ class DownloadController extends GetxController {
       final subsDir = Directory(p.join(
         root.path,
         'Anime',
-        task.extensionName,
-        task.mediaTitle,
+        MediaDownloader.sanitizePathSegment(task.extensionName),
+        MediaDownloader.sanitizePathSegment(task.mediaTitle),
         'Episode_${task.episode.number}_subs',
       ));
       if (!await subsDir.exists()) await subsDir.create(recursive: true);
 
+      final localSubs = <hive.Track>[];
       for (final sub in subs) {
         if (sub.file == null || sub.file!.isEmpty) continue;
 
         try {
+          final ext = MediaDownloader.getSubtitleExtension(sub.file!);
+          final fileName = MediaDownloader.sanitizePathSegment(
+              '${sub.label ?? "Unknown"}$ext');
+          final filePath = p.join(subsDir.path, fileName);
           final response = await http.get(Uri.parse(sub.file!));
-          if (response.statusCode == 200) {
-            final fileName = MediaDownloader.sanitizePathSegment(
-                '${sub.label ?? "Unknown"}.vtt');
-            final filePath = p.join(subsDir.path, fileName);
+          if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
             await File(filePath).writeAsBytes(response.bodyBytes);
+            localSubs.add(hive.Track(
+              file: filePath,
+              label: sub.label,
+            ));
           }
         } catch (e) {
           debugPrint('Error downloading subtitle ${sub.label}: $e');
         }
+      }
+      if (localSubs.isNotEmpty) {
+        task.subtitles = localSubs;
       }
     } catch (e) {
       debugPrint('Error creating subtitle directory: $e');

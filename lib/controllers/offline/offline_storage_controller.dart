@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:anymex/controllers/service_handler/service_handler.dart';
+import 'package:anymex/controllers/settings/settings.dart';
 import 'package:anymex/controllers/source/source_controller.dart';
 import 'package:anymex/controllers/sync/gist_sync_controller.dart';
 import 'package:anymex/database/isar_models/chapter.dart';
@@ -21,6 +22,9 @@ enum MediaLibraryType {
 }
 
 class OfflineStorageController extends GetxController {
+  bool get _isIncognito =>
+      Get.isRegistered<Settings>() && Get.find<Settings>().isIncognito.value;
+
   GistSyncController? get _syncCtrl => Get.isRegistered<GistSyncController>()
       ? Get.find<GistSyncController>()
       : null;
@@ -562,15 +566,31 @@ class OfflineStorageController extends GetxController {
       } else {
         await isar.writeTxn(() async {
           bool updated = false;
-          if ((existing.name == null ||
-                  existing.name == '?' ||
-                  existing.name == 'Unknown Title' ||
-                  existing.name!.isEmpty) &&
-              original.title.isNotEmpty &&
+          if (original.title.isNotEmpty &&
               original.title != '?' &&
               original.title != 'Unknown Title') {
             existing.name = original.title;
-            existing.english = original.title;
+            final eng = (original.englishTitle != null &&
+                    original.englishTitle!.isNotEmpty &&
+                    original.englishTitle != '?')
+                ? original.englishTitle!
+                : (original.title != original.romajiTitle
+                    ? original.title
+                    : (existing.english?.isNotEmpty ?? false)
+                        ? existing.english!
+                        : original.title);
+            existing.english = eng;
+            updated = true;
+          }
+          if (original.romajiTitle.isNotEmpty &&
+              original.romajiTitle != '?' &&
+              original.romajiTitle != 'Unknown Title') {
+            existing.jname = original.romajiTitle;
+            if (original.nativeTitle != null && original.nativeTitle!.isNotEmpty) {
+              existing.japanese = original.nativeTitle;
+            } else if (existing.japanese == null || existing.japanese!.isEmpty) {
+              existing.japanese = original.romajiTitle;
+            }
             updated = true;
           }
           if ((existing.poster == null ||
@@ -606,6 +626,7 @@ class OfflineStorageController extends GetxController {
     List<Episode>? episodes,
     Episode? currentEpisode,
   ) async {
+    if (_isIncognito) return;
     if (currentEpisode != null &&
         (currentEpisode.title == null || currentEpisode.title!.isEmpty) &&
         episodes != null) {
@@ -630,6 +651,29 @@ class OfflineStorageController extends GetxController {
           if (existingAnime.idMal == null && original.idMal != '0') {
             existingAnime.idMal = original.idMal;
           }
+          if (original.title.isNotEmpty &&
+              original.title != '?' &&
+              original.title != 'Unknown Title') {
+            existingAnime.name = original.title;
+            final eng = (original.englishTitle != null &&
+                    original.englishTitle!.isNotEmpty &&
+                    original.englishTitle != '?')
+                ? original.englishTitle!
+                : (original.title != original.romajiTitle
+                    ? original.title
+                    : (existingAnime.english?.isNotEmpty ?? false)
+                        ? existingAnime.english!
+                        : original.title);
+            existingAnime.english = eng;
+          }
+          if (original.romajiTitle.isNotEmpty &&
+              original.romajiTitle != '?' &&
+              original.romajiTitle != 'Unknown Title') {
+            existingAnime.jname = original.romajiTitle;
+            if (original.nativeTitle != null && original.nativeTitle!.isNotEmpty) {
+              existingAnime.japanese = original.nativeTitle;
+            }
+          }
           await isar.offlineMedias.put(existingAnime);
           Logger.i('Updated anime: ${existingAnime.name}');
         } else {
@@ -648,6 +692,7 @@ class OfflineStorageController extends GetxController {
     List<Chapter>? chapters,
     Chapter? currentChapter,
   ) async {
+    if (_isIncognito) return;
     if (currentChapter != null &&
         (currentChapter.title == null || currentChapter.title!.isEmpty) &&
         chapters != null) {
@@ -670,6 +715,29 @@ class OfflineStorageController extends GetxController {
                 sourceController.activeMangaSource.value?.name;
           }
           existingManga.currentChapter = currentChapter;
+          if (original.title.isNotEmpty &&
+              original.title != '?' &&
+              original.title != 'Unknown Title') {
+            existingManga.name = original.title;
+            final eng = (original.englishTitle != null &&
+                    original.englishTitle!.isNotEmpty &&
+                    original.englishTitle != '?')
+                ? original.englishTitle!
+                : (original.title != original.romajiTitle
+                    ? original.title
+                    : (existingManga.english?.isNotEmpty ?? false)
+                        ? existingManga.english!
+                        : original.title);
+            existingManga.english = eng;
+          }
+          if (original.romajiTitle.isNotEmpty &&
+              original.romajiTitle != '?' &&
+              original.romajiTitle != 'Unknown Title') {
+            existingManga.jname = original.romajiTitle;
+            if (original.nativeTitle != null && original.nativeTitle!.isNotEmpty) {
+              existingManga.japanese = original.nativeTitle;
+            }
+          }
           await isar.offlineMedias.put(existingManga);
           Logger.i('Updated manga: ${existingManga.name}');
         } else {
@@ -689,6 +757,7 @@ class OfflineStorageController extends GetxController {
     Chapter? currentChapter,
     Source source,
   ) async {
+    if (_isIncognito) return;
     if (currentChapter != null &&
         (currentChapter.title == null || currentChapter.title!.isEmpty) &&
         chapters != null) {
@@ -710,6 +779,29 @@ class OfflineStorageController extends GetxController {
             currentChapter.sourceName = source.name;
           }
           existingNovel.currentChapter = currentChapter;
+          if (original.title.isNotEmpty &&
+              original.title != '?' &&
+              original.title != 'Unknown Title') {
+            existingNovel.name = original.title;
+            final eng = (original.englishTitle != null &&
+                    original.englishTitle!.isNotEmpty &&
+                    original.englishTitle != '?')
+                ? original.englishTitle!
+                : (original.title != original.romajiTitle
+                    ? original.title
+                    : (existingNovel.english?.isNotEmpty ?? false)
+                        ? existingNovel.english!
+                        : original.title);
+            existingNovel.english = eng;
+          }
+          if (original.romajiTitle.isNotEmpty &&
+              original.romajiTitle != '?' &&
+              original.romajiTitle != 'Unknown Title') {
+            existingNovel.jname = original.romajiTitle;
+            if (original.nativeTitle != null && original.nativeTitle!.isNotEmpty) {
+              existingNovel.japanese = original.nativeTitle;
+            }
+          }
           await isar.offlineMedias.put(existingNovel);
           Logger.i('Updated novel: ${existingNovel.name}');
         } else {
@@ -728,6 +820,7 @@ class OfflineStorageController extends GetxController {
     Episode episode, {
     bool syncToCloud = true,
   }) async {
+    if (_isIncognito) return;
     await _synchronizedWrite(animeId, () async {
       final existingAnime = getAnimeById(animeId);
       if (existingAnime == null) {
@@ -812,6 +905,7 @@ class OfflineStorageController extends GetxController {
     Source? source,
     bool syncToCloud = true,
   }) async {
+    if (_isIncognito) return;
     await _synchronizedWrite(mangaId, () async {
       OfflineMedia? existingManga = getMangaById(mangaId);
       existingManga ??= getNovelById(mangaId);
@@ -890,6 +984,7 @@ class OfflineStorageController extends GetxController {
   }
 
   Future<void> addOrUpdateNovelChapter(String novelId, Chapter chapter) async {
+    if (_isIncognito) return;
     final existingNovel = getNovelById(novelId);
     if (existingNovel == null) {
       Logger.i(
@@ -1051,29 +1146,39 @@ class OfflineStorageController extends GetxController {
     Episode? currentEpisode,
   ) {
     final handler = Get.find<ServiceHandler>();
-    final validTitle = (original.title.isNotEmpty &&
-            original.title != '?' &&
-            original.title != 'Unknown Title')
-        ? original.title
-        : (original.romajiTitle.isNotEmpty &&
-                original.romajiTitle != '?' &&
-                original.romajiTitle != 'Unknown Title'
-            ? original.romajiTitle
-            : '?');
+    final validEnglish = (original.englishTitle != null &&
+            original.englishTitle!.isNotEmpty &&
+            original.englishTitle != '?')
+        ? original.englishTitle!
+        : (original.title.isNotEmpty &&
+                original.title != '?' &&
+                original.title != 'Unknown Title')
+            ? original.title
+            : (original.romajiTitle.isNotEmpty &&
+                    original.romajiTitle != '?' &&
+                    original.romajiTitle != 'Unknown Title'
+                ? original.romajiTitle
+                : '?');
 
     final validRomaji = (original.romajiTitle.isNotEmpty &&
             original.romajiTitle != '?' &&
             original.romajiTitle != 'Unknown Title')
         ? original.romajiTitle
-        : validTitle;
+        : validEnglish;
+
+    final validNative = (original.nativeTitle != null &&
+            original.nativeTitle!.isNotEmpty &&
+            original.nativeTitle != '?')
+        ? original.nativeTitle!
+        : validRomaji;
 
     return OfflineMedia(
       mediaId: original.id,
       idMal: original.idMal,
       jname: validRomaji,
-      name: validTitle,
-      english: validTitle,
-      japanese: validRomaji,
+      name: original.title.isNotEmpty && original.title != '?' ? original.title : validEnglish,
+      english: validEnglish,
+      japanese: validNative,
       description: original.description,
       poster: original.poster,
       cover: original.cover,

@@ -1,7 +1,7 @@
-import 'dart:collection';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:webview_all/webview_all.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
 
 class DiscordLoginPage extends StatefulWidget {
@@ -17,94 +17,134 @@ class DiscordLoginPage extends StatefulWidget {
 }
 
 class _DiscordLoginPageState extends State<DiscordLoginPage> {
-  late InAppWebViewController _controller;
+  late final WebViewController _controller;
   bool _tokenExtracted = false;
   bool _isLoading = true;
   double _progress = 0.0;
   bool _isResetting = false;
+  Timer? _pollingTimer;
 
-  static const String _interceptScript = '''
+  static const String _interceptScript = r'''
     (function() {
       if (window.__tokenListenerInstalled) return;
       window.__tokenListenerInstalled = true;
 
       function sendToken(token) {
-        if (!token || token === 'null') return;
-        try {
-          window.flutter_inappwebview.callHandler('onTokenFound', token);
-        } catch(e) {
-          window.__discordToken = token;
+        if (!token || typeof token !== 'string') return;
+        token = token.trim().replace(/^"|"$/g, '');
+        if (token.indexOf('Bearer ') === 0) {
+          token = token.substring(7).trim();
         }
+        if (token.length < 25 || token === 'null' || token === 'undefined') return;
+        window.__discordToken = token;
+        try {
+          if (window.onTokenFound && window.onTokenFound.postMessage) {
+            window.onTokenFound.postMessage(token);
+          }
+        } catch(e) {}
       }
 
-      function patchWebpack() {
+      function getFromIframe() {
         try {
-          var chunks = window.webpackChunkdiscord_app;
-          if (!chunks) return false;
-          var _push = chunks.push.bind(chunks);
-          chunks.push = function(chunk) {
-            var result = _push(chunk);
-            try {
-              var req = window.__webpack_require__ || webpackChunkdiscord_app.__webpack_require__;
-              if (req) {
-                var tokenModule = req('MuTa') || req('./node_modules/discord-api-types/v9.js');
-                if (tokenModule && tokenModule.getToken) {
-                  var t = tokenModule.getToken();
+          var iframe = document.createElement('iframe');
+          iframe.style.display = 'none';
+          document.body.appendChild(iframe);
+          var t = iframe.contentWindow.localStorage.getItem('token');
+          iframe.remove();
+          if (t) sendToken(t);
+        } catch(e) {}
+      }
+
+      function getFromWebpack() {
+        try {
+          var req;
+          if (window.webpackChunkdiscord_app && Array.isArray(window.webpackChunkdiscord_app)) {
+            window.webpackChunkdiscord_app.push([
+              [Symbol()],
+              {},
+              function(r) { req = r; }
+            ]);
+          } else if (window.__webpack_require__) {
+            req = window.__webpack_require__;
+          }
+          if (req && req.c) {
+            for (var id in req.c) {
+              try {
+                var exp = req.c[id] && req.c[id].exports;
+                if (!exp) continue;
+                if (exp.default && typeof exp.default.getToken === 'function') {
+                  var t = exp.default.getToken();
                   if (t) sendToken(t);
                 }
-              }
-            } catch(e) {}
-            return result;
-          };
-          return true;
-        } catch(e) { return false; }
-      }
-
-      function scanWebpackModules() {
-        try {
-          var req = window.webpackChunkdiscord_app &&
-                    window.webpackChunkdiscord_app.__webpack_require__;
-          if (!req || !req.m) return;
-          Object.values(req.m).forEach(function(mod) {
-            try {
-              var m = { exports: {} };
-              mod(m, m.exports, req);
-              if (m.exports && typeof m.exports.getToken === 'function') {
-                var t = m.exports.getToken();
-                if (t) sendToken(t);
-              }
-            } catch(e) {}
-          });
-        } catch(e) {}
-      }
-
-      function sweepStorage() {
-        try {
-          var t = localStorage.getItem('token');
-          if (t && t !== 'null') { sendToken(t.replace(/"/g,'')); return; }
-        } catch(e) {}
-        try {
-          var keys = Object.keys(localStorage);
-          for (var i = 0; i < keys.length; i++) {
-            var val = localStorage.getItem(keys[i]);
-            if (val && /^[\\w-]{50,100}\$/.test(val.replace(/"/g,''))) {
-              sendToken(val.replace(/"/g,''));
-              return;
+                if (typeof exp.getToken === 'function') {
+                  var t = exp.getToken();
+                  if (t) sendToken(t);
+                }
+              } catch(e) {}
             }
           }
         } catch(e) {}
       }
 
-      (function patchNetwork() {
+      function getFromStorage() {
+        try {
+          var t = localStorage.getItem('token');
+          if (t) sendToken(t);
+        } catch(e) {}
+        try {
+          for (var i = 0; i < localStorage.length; i++) {
+            var val = localStorage.getItem(localStorage.key(i));
+            if (val && val.length > 25 && (val.indexOf('.') > -1 || val.indexOf('mfa.') === 0)) {
+              sendToken(val);
+            }
+          }
+        } catch(e) {}
+      }
+
+      try {
         var _fetch = window.fetch;
-        window.fetch = function() {
-          return _fetch.apply(this, arguments).then(function(res) {
-            var clone = res.clone();
-            clone.json().then(function(json) {
-              if (json && json.token) sendToken(json.token);
-            }).catch(function(){});
-            return res;
-          });
+        if (_fetch) {
+          window.fetch = function(input, init) {
+            try {
+              if (init && init.headers) {
+                var auth;
+                if (typeof Headers !== 'undefined' && init.headers instanceof Headers) {
+                  auth = init.headers.get('authorization') || init.headers.get('Authorization');
+                } else if (Array.isArray(init.headers)) {
+                  for (var i = 0; i < init.headers.length; i++) {
+                    if (init.headers[i][0].toLowerCase() === 'authorization') {
+                      auth = init.headers[i][1];
+                      break;
+                    }
+                  }
+                } else if (typeof init.headers === 'object') {
+                  auth = init.headers['Authorization'] || init.headers['authorization'];
+                }
+                if (auth) sendToken(auth);
+              }
+            } catch(e) {}
+            return _fetch.apply(this, arguments).then(function(res) {
+              try {
+                var clone = res.clone();
+                clone.json().then(function(json) {
+                  if (json && json.token) sendToken(json.token);
+                }).catch(function(){});
+              } catch(e) {}
+              return res;
+            });
+          };
+        }
+      } catch(e) {}
+
+      try {
+        var _setRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+        XMLHttpRequest.prototype.setRequestHeader = function(header, value) {
+          try {
+            if (header && header.toLowerCase() === 'authorization' && value) {
+              sendToken(value);
+            }
+          } catch(e) {}
+          return _setRequestHeader.apply(this, arguments);
         };
 
         var _open = XMLHttpRequest.prototype.open;
@@ -117,34 +157,155 @@ class _DiscordLoginPageState extends State<DiscordLoginPage> {
           });
           return _open.apply(this, arguments);
         };
-      })();
+      } catch(e) {}
 
       var attempts = 0;
       var interval = setInterval(function() {
         attempts++;
-        if (attempts > 60) { clearInterval(interval); return; }
-        if (window.__discordToken) { sendToken(window.__discordToken); }
-        patchWebpack();
-        scanWebpackModules();
-        sweepStorage();
-      }, 500);
+        if (window.__discordToken) {
+          sendToken(window.__discordToken);
+        }
+        getFromIframe();
+        getFromWebpack();
+        getFromStorage();
+        if (attempts > 120 && !window.__discordToken) {
+          clearInterval(interval);
+        }
+      }, 400);
     })();
   ''';
 
+  @override
+  void initState() {
+    super.initState();
+    _initController();
+    _startPolling();
+  }
+
+  void _initController() {
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..addJavaScriptChannel(
+        'onTokenFound',
+        onMessageReceived: (message) {
+          if (message.message.isNotEmpty) {
+            _handleToken(message.message);
+          }
+        },
+      )
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (url) {
+            if (mounted) setState(() => _isLoading = true);
+          },
+          onPageFinished: (url) async {
+            if (mounted) {
+              setState(() {
+                _isLoading = false;
+                _progress = 1.0;
+              });
+            }
+            await _controller.runJavaScript(_interceptScript);
+            await _checkAndExtractToken();
+          },
+          onProgress: (progress) {
+            if (mounted) setState(() => _progress = progress / 100);
+          },
+          onUrlChange: (change) async {
+            await _controller.runJavaScript(_interceptScript);
+            await _checkAndExtractToken();
+          },
+          onNavigationRequest: (request) => NavigationDecision.navigate,
+        ),
+      )
+      ..loadRequest(Uri.parse('https://discord.com/login'));
+  }
+
+  @override
+  void dispose() {
+    _pollingTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startPolling() {
+    _pollingTimer?.cancel();
+    _pollingTimer = Timer.periodic(const Duration(milliseconds: 400), (timer) async {
+      if (_tokenExtracted || !mounted) {
+        timer.cancel();
+        return;
+      }
+      await _checkAndExtractToken();
+    });
+  }
+
+  Future<void> _checkAndExtractToken() async {
+    if (_tokenExtracted) return;
+    try {
+      final result = await _controller.runJavaScriptReturningResult(r'''
+        (function() {
+          if (window.__discordToken) return window.__discordToken;
+          try {
+            var iframe = document.createElement('iframe');
+            iframe.style.display = 'none';
+            document.body.appendChild(iframe);
+            var t = iframe.contentWindow.localStorage.getItem('token');
+            iframe.remove();
+            if (t && t !== 'null' && t.length > 25) return t.replace(/"/g, '');
+          } catch(e) {}
+          try {
+            var req;
+            if (window.webpackChunkdiscord_app && Array.isArray(window.webpackChunkdiscord_app)) {
+              window.webpackChunkdiscord_app.push([[Symbol()], {}, function(r) { req = r; }]);
+            } else if (window.__webpack_require__) {
+              req = window.__webpack_require__;
+            }
+            if (req && req.c) {
+              for (var id in req.c) {
+                var exp = req.c[id] && req.c[id].exports;
+                if (!exp) continue;
+                if (exp.default && typeof exp.default.getToken === 'function') {
+                  var tok = exp.default.getToken();
+                  if (tok && typeof tok === 'string' && tok.length > 25) return tok.replace(/"/g, '');
+                }
+                if (typeof exp.getToken === 'function') {
+                  var tok = exp.getToken();
+                  if (tok && typeof tok === 'string' && tok.length > 25) return tok.replace(/"/g, '');
+                }
+              }
+            }
+          } catch(e) {}
+          try {
+            var t2 = localStorage.getItem('token');
+            if (t2 && t2 !== 'null' && t2.length > 25) return t2.replace(/"/g, '');
+          } catch(e) {}
+          return null;
+        })();
+      ''');
+      if (result.toString().isNotEmpty && result.toString() != 'null') {
+        _handleToken(result.toString());
+      }
+    } catch (_) {}
+  }
+
   void _handleToken(String raw) {
     if (_tokenExtracted) return;
-    final token = raw.trim().replaceAll('"', '');
-    if (token.isEmpty || token == 'null') return;
+    var token = raw.trim().replaceAll('"', '');
+    if (token.startsWith('Bearer ')) {
+      token = token.substring(7).trim();
+    }
+    if (token.isEmpty || token == 'null' || token == 'undefined' || token.length < 25) return;
     _tokenExtracted = true;
+    _pollingTimer?.cancel();
     widget.onTokenExtracted(token);
     if (mounted) Navigator.of(context).pop();
   }
 
   Future<void> _resetSession() async {
+    _pollingTimer?.cancel();
     setState(() => _isResetting = true);
 
     try {
-      await _controller.evaluateJavascript(source: '''
+      await _controller.runJavaScript(r'''
         try { localStorage.clear(); } catch(e) {}
         try { sessionStorage.clear(); } catch(e) {}
         try { window.__tokenListenerInstalled = false; } catch(e) {}
@@ -153,18 +314,20 @@ class _DiscordLoginPageState extends State<DiscordLoginPage> {
 
       await _controller.clearCache();
 
-      final cookieManager = CookieManager.instance();
-      await cookieManager.deleteAllCookies();
+      await WebViewCookieManager().clearCookies();
 
       _tokenExtracted = false;
 
-      await _controller.loadUrl(
-        urlRequest: URLRequest(url: WebUri('https://discord.com/login')),
+      await _controller.loadRequest(
+        Uri.parse('https://discord.com/login'),
       );
     } catch (e) {
       debugPrint('Reset error: $e');
     } finally {
-      if (mounted) setState(() => _isResetting = false);
+      if (mounted) {
+        setState(() => _isResetting = false);
+        _startPolling();
+      }
     }
   }
 
@@ -272,62 +435,8 @@ class _DiscordLoginPageState extends State<DiscordLoginPage> {
                     width: 1,
                   ),
                 ),
-                child: InAppWebView(
-                  initialUrlRequest: URLRequest(
-                    url: WebUri('https://discord.com/login'),
-                  ),
-                  initialUserScripts: UnmodifiableListView([
-                    UserScript(
-                      source: _interceptScript,
-                      injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-                    ),
-                  ]),
-                  initialSettings: InAppWebViewSettings(
-                    useHybridComposition: false,
-                    javaScriptEnabled: true,
-                    domStorageEnabled: true,
-                    databaseEnabled: true,
-                    supportZoom: false,
-                    useWideViewPort: true,
-                    loadWithOverviewMode: true,
-                    allowUniversalAccessFromFileURLs: true,
-                    allowFileAccessFromFileURLs: true,
-                    limitsNavigationsToAppBoundDomains: false,
-                  ),
-                  onWebViewCreated: (controller) {
-                    _controller = controller;
-                    _controller.addJavaScriptHandler(
-                      handlerName: 'onTokenFound',
-                      callback: (args) {
-                        if (args.isNotEmpty) {
-                          _handleToken(args[0].toString());
-                        }
-                      },
-                    );
-                  },
-                  onLoadStart: (controller, url) {
-                    if (mounted) setState(() => _isLoading = true);
-                  },
-                  onLoadStop: (controller, url) async {
-                    if (mounted) {
-                      setState(() {
-                        _isLoading = false;
-                        _progress = 1.0;
-                      });
-                    }
-                    await controller.evaluateJavascript(
-                        source: _interceptScript);
-                  },
-                  onProgressChanged: (controller, progress) {
-                    if (mounted) setState(() => _progress = progress / 100);
-                  },
-                  onUpdateVisitedHistory: (controller, url, isReload) async {
-                    await controller.evaluateJavascript(
-                        source: _interceptScript);
-                  },
-                  shouldOverrideUrlLoading:
-                      (controller, navigationAction) async =>
-                          NavigationActionPolicy.ALLOW,
+                child: WebViewWidget(
+                  controller: _controller,
                 ),
               ),
             ),

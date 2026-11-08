@@ -40,10 +40,14 @@ import 'package:anymex/widgets/common/lazy_indexed_stack.dart';
 import 'package:anymex/widgets/common/media_mode_selector.dart';
 import 'package:anymex/widgets/common/home_continue_button.dart';
 import 'package:anymex/controllers/media_mode_controller.dart';
-import 'package:anymex/services/fcm_service.dart';
+import 'package:anymex/services/fcm_service.dart'
+    hide firebaseMessagingBackgroundHandler;
 import 'package:anymex/services/commentum_service.dart';
 import 'package:anymex/controllers/watchium/watchium_service.dart';
 import 'package:anymex/utils/logger.dart';
+import 'package:anymex/utils/notification.dart';
+import 'package:anymex/services/anilist_notification_service.dart';
+import 'package:anymex/screens/notifications/notification_controller.dart';
 import 'package:anymex/utils/deeplink.dart';
 import 'package:anymex/utils/external_font_loader.dart';
 import 'package:anymex/utils/register_protocol/register_protocol.dart';
@@ -60,10 +64,10 @@ import 'package:anymex/widgets/non_widgets/snackbar.dart';
 import 'package:app_links/app_links.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:get/get.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:flutter_iconly/flutter_iconly.dart';
@@ -74,7 +78,6 @@ import 'package:media_kit/media_kit.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
-WebViewEnvironment? webViewEnvironment;
 late Isar isar;
 final appLinks = AppLinks();
 
@@ -96,6 +99,15 @@ class MyCustomScrollBehavior extends MaterialScrollBehavior {
         PointerDeviceKind.trackpad,
         PointerDeviceKind.stylus
       };
+
+  @override
+  ScrollPhysics getScrollPhysics(BuildContext context) =>
+      const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics());
+
+  @override
+  Widget buildOverscrollIndicator(
+          BuildContext context, Widget child, ScrollableDetails details) =>
+      child;
 }
 
 void initDeepLinkListener(List<String> args) async {
@@ -153,19 +165,6 @@ void main(List<String> args) async {
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
 
-    await safeCall(() async {
-      if (!Platform.isLinux) {
-        if (Platform.isWindows) {
-          webViewEnvironment = await WebViewEnvironment.create();
-        }
-        if (Platform.isAndroid || Platform.isIOS) {
-          await InAppWebViewController.setWebContentsDebuggingEnabled(
-            !const bool.fromEnvironment('dart.vm.product'),
-          );
-        }
-      }
-    }, errorMessage: 'Failed to initialize WebViewEnvironment');
-
     await safeCall(() => ExternalFontLoader.loadAllFonts(),
         errorMessage: 'Failed to load external fonts');
 
@@ -183,6 +182,7 @@ void main(List<String> args) async {
                 options: DefaultFirebaseOptions.currentPlatform,
               ),
           errorMessage: 'Failed to initialize Firebase');
+      FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
     }
 
     if (Platform.isWindows || Platform.isLinux) {
@@ -279,6 +279,9 @@ void _initializeGetxController() async {
     Get.put(WatchiumService(), permanent: true);
     Get.put(GistSyncController(), permanent: true);
     Get.put(DownloadController(), permanent: true);
+    Get.put(NotificationService(), permanent: true);
+    Get.put(AnilistNotificationService(), permanent: true);
+    Get.put(NotificationController(), permanent: true);
     Get.put(StatsTracker());
     Get.lazyPut(() => CacheController());
     Get.lazyPut(() => MediaModeController());
@@ -341,6 +344,16 @@ class _MainAppState extends State<MainApp> {
 
     focusNode = FocusNode();
 
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        precacheImage(const AssetImage('assets/images/bg_glass.webp'), context);
+        final customBg = Get.find<Settings>().liquidBackgroundPath;
+        if (customBg.isNotEmpty) {
+          precacheImage(FileImage(File(customBg)), context);
+        }
+      }
+    });
+
     if (!Platform.isLinux) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         safeCall(() => FcmService.init(),
@@ -397,10 +410,7 @@ class _MainAppState extends State<MainApp> {
                   top: 0,
                   left: 0,
                   right: 0,
-                  child: Container(
-                    color: Colors.transparent,
-                    child: AnymeXTitleBar.titleBar(),
-                  ),
+                  child: AnymeXTitleBar.titleBar(),
                 ),
                 // const FpsMeter(),
               ],
@@ -637,11 +647,12 @@ class _FilterScreenState extends State<FilterScreen> {
   Widget build(BuildContext context) {
     final authService = Get.put(ServiceHandler());
     return AnymeXScaffold(
+        resizeToAvoidBottomInset: false,
         body: PlatformBuilder(
-      strictMode: false,
-      desktopBuilder: _buildDesktopLayout(context, authService),
-      androidBuilder: _buildAndroidLayout(authService),
-    ));
+          strictMode: false,
+          desktopBuilder: _buildDesktopLayout(context, authService),
+          androidBuilder: _buildAndroidLayout(authService),
+        ));
   }
 
   Widget _buildDesktopLayout(BuildContext context, ServiceHandler authService) {
@@ -683,6 +694,21 @@ class _FilterScreenState extends State<FilterScreen> {
                               final count = Get.find<SourceController>()
                                   .extensionUpdatesCount
                                   .value;
+                              int unread = 0;
+                              try {
+                                if (Get.isRegistered<AnilistAuth>()) {
+                                  unread += Get.find<AnilistAuth>()
+                                      .unreadAnilistCount
+                                      .value;
+                                }
+                              } catch (_) {}
+                              try {
+                                if (Get.isRegistered<CommentumService>()) {
+                                  unread += Get.find<CommentumService>()
+                                      .unreadNotificationCount
+                                      .value;
+                                }
+                              } catch (_) {}
                               final avatar = CircleAvatar(
                                   radius: 24,
                                   backgroundColor: Theme.of(context)
@@ -703,6 +729,16 @@ class _FilterScreenState extends State<FilterScreen> {
                                                   ''),
                                         )
                                       : const Icon((IconlyBold.profile)));
+                              if (unread > 0) {
+                                return AnymeXBadge(
+                                  label: unread > 99 ? '99+' : '$unread',
+                                  backgroundColor:
+                                      Theme.of(context).colorScheme.error,
+                                  textColor: Colors.white,
+                                  offset: const Offset(0, 0),
+                                  child: avatar,
+                                );
+                              }
                               if (count > 0) {
                                 return AnymeXBadge(
                                   label: count.toString(),

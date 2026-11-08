@@ -1,3 +1,6 @@
+import 'dart:io';
+import 'dart:ui';
+import 'package:anymex/widgets/anymex_widgets/anymex_titlebar.dart';
 import 'package:anymex/database/isar_models/episode.dart';
 import 'package:anymex/utils/media_share.dart';
 import 'package:anymex/models/Media/media.dart';
@@ -8,6 +11,11 @@ import 'package:anymex/screens/anime/details/widgets/media_stats_section.dart';
 import 'package:anymex/screens/anime/details/widgets/media_characters_section.dart';
 import 'package:anymex/screens/anime/details/widgets/media_quick_actions.dart';
 import 'package:anymex/screens/anime/widgets/comments/comments_section.dart';
+import 'package:anymex/screens/anime/widgets/comments/controller/comment_preloader.dart';
+import 'package:anymex/screens/anime/widgets/comments/controller/comments_controller.dart';
+import 'package:anymex/screens/anime/widgets/comments/widgets/comment_input_bar.dart';
+import 'package:anymex/screens/anime/widgets/comments/widgets/leaderboard_sheet.dart';
+import 'package:anymex/widgets/common/policy_sheet.dart';
 import 'package:anymex/screens/anime/widgets/episode_section.dart';
 import 'package:anymex/screens/manga/widgets/chapter_section.dart';
 import 'package:anymex/screens/anime/widgets/voice_actor.dart';
@@ -20,27 +28,33 @@ import 'package:anymex/screens/manga/reading_page.dart';
 import 'package:anymex/screens/novel/reader/novel_reader.dart';
 import 'package:anymex/screens/manga/widgets/track_dialog.dart';
 import 'package:anymex/database/data_keys/keys.dart';
+import 'package:anymex/utils/color_extractor.dart';
 import 'package:anymex/controllers/track/track_binding_controller.dart';
 import 'package:anymex/controllers/service_handler/service_handler.dart';
 import 'package:anymex/controllers/settings/settings.dart';
 import 'package:anymex/widgets/anime/media_header.dart';
 import 'package:anymex/widgets/common/anymex_scaffold.dart';
+import 'package:anymex/widgets/common/baked_blur_image.dart';
 import 'package:anymex/widgets/common/reusable_carousel.dart';
 import 'package:anymex_extension_runtime_bridge/anymex_extension_runtime_bridge.dart';
-import 'package:expressive_loading_indicator/expressive_loading_indicator.dart';
+import 'package:anymex/widgets/anymex_widgets/anymex_container.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_image.dart';
 import 'package:anymex/widgets/common/navbar.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
-import 'package:anymex/widgets/helper/tv_wrapper.dart';
 import 'package:anymex/widgets/helper/platform_builder.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:get/get.dart';
+import 'package:anymex/controllers/settings/methods.dart';
+import 'package:anymex/widgets/anymex_widgets/anymex_linear_indicator.dart';
+import 'package:anymex/widgets/animation/widget_animations.dart';
 
 class MediaDetailsPage extends StatefulWidget {
   final Media media;
   final String tag;
   final Source? source;
   final int initialTabIndex;
+  final String? scrollToCommentId;
 
   const MediaDetailsPage({
     super.key,
@@ -48,6 +62,7 @@ class MediaDetailsPage extends StatefulWidget {
     required this.tag,
     this.source,
     this.initialTabIndex = 0,
+    this.scrollToCommentId,
   });
 
   @override
@@ -56,102 +71,414 @@ class MediaDetailsPage extends StatefulWidget {
 
 class _MediaDetailsPageState extends State<MediaDetailsPage> {
   late final MediaDetailsController controller;
-  late final PageController pageController;
-  bool _isAnimatingPage = false;
-  bool _isContinueExpanded = false;
+  late final RxString _posterColor;
+  bool _isRouteAnimating = true;
+
+  static final Map<String, ColorScheme> _posterSchemeCache = {};
+  static ColorScheme? _getPosterScheme(Color? seed, Brightness brightness) {
+    if (seed == null) return null;
+    final key = '${seed.value}_${brightness.name}';
+    return _posterSchemeCache.putIfAbsent(
+      key,
+      () => ColorScheme.fromSeed(brightness: brightness, seedColor: seed),
+    );
+  }
+
+  CommentSectionController get _commentController {
+    final media = widget.media;
+    final tag = media.uniqueId;
+    if (Get.isRegistered<CommentSectionController>(tag: tag)) {
+      return Get.find<CommentSectionController>(tag: tag);
+    }
+    final preloaded = CommentPreloader.to.getPreloadedController(tag);
+    if (preloaded != null) {
+      preloaded.updateProgress(controller.mediaProgress.value);
+      return preloaded;
+    }
+    return Get.put(
+      CommentSectionController(
+        media: media,
+        initialProgress: controller.mediaProgress.value,
+      ),
+      tag: tag,
+    );
+  }
+
+  String? _lastExtractedUrl;
+  Worker? _mediaColorWorker;
+
+  void _resolveDynamicColor(Media media, {bool allowExtract = false}) {
+    final usePoster = settingsController.usePosterForBlur;
+    final effectiveCover =
+        (media.cover?.isNotEmpty == true ? media.cover! : media.poster);
+    final targetUrl = usePoster ? media.poster : effectiveCover;
+
+    if (_posterColor.value.isEmpty && media.color.isNotEmpty) {
+      _posterColor.value = media.color;
+    }
+
+    if (targetUrl.isEmpty) {
+      if (!usePoster && _posterColor.value.isNotEmpty) {
+        _posterColor.value = '';
+      }
+      return;
+    }
+
+    final cached = ImageColorExtractor.getCachedColor(targetUrl);
+    if (cached != null) {
+      final hex = '#${cached.value.toRadixString(16).padLeft(8, '0')}';
+      if (_posterColor.value != hex) {
+        _posterColor.value = hex;
+      }
+      _lastExtractedUrl = targetUrl;
+      return;
+    }
+
+    if (!allowExtract || _isRouteAnimating || _lastExtractedUrl == targetUrl) {
+      return;
+    }
+
+    _lastExtractedUrl = targetUrl;
+    ImageColorExtractor.extractColor(targetUrl).then((c) {
+      if (c != null && mounted) {
+        _posterColor.value = '#${c.value.toRadixString(16).padLeft(8, '0')}';
+      }
+    });
+  }
 
   @override
   void initState() {
     super.initState();
-    pageController = PageController(initialPage: widget.initialTabIndex);
+    final usePoster = settingsController.usePosterForBlur;
+    _posterColor = (usePoster && widget.media.color.isNotEmpty
+            ? widget.media.color
+            : '')
+        .obs;
+    _resolveDynamicColor(widget.media, allowExtract: false);
+    final initialPage = widget.scrollToCommentId != null
+        ? 2
+        : widget.initialTabIndex;
     controller = Get.put(
       MediaDetailsController(
         initialMedia: widget.media,
         tag: widget.tag,
         initialSource: widget.source,
-        initialTabIndex: widget.initialTabIndex,
+        initialTabIndex: initialPage,
       ),
       tag: widget.tag,
     );
+    _mediaColorWorker = ever(controller.media, (m) {
+      if (!_isRouteAnimating) {
+        _resolveDynamicColor(m, allowExtract: true);
+      }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (Platform.isWindows && mounted) {
+        AnymeXTitleBar.isTransparent.value = true;
+      }
+      final route = ModalRoute.of(context);
+      if (route != null && route.animation != null) {
+        if (route.animation!.isCompleted) {
+          _isRouteAnimating = false;
+          _resolveDynamicColor(controller.media.value, allowExtract: true);
+          if (mounted) setState(() {});
+        } else {
+          route.animation!.addStatusListener((status) {
+            if (status == AnimationStatus.completed && mounted) {
+              setState(() => _isRouteAnimating = false);
+              _resolveDynamicColor(controller.media.value, allowExtract: true);
+            }
+          });
+        }
+      } else {
+        _isRouteAnimating = false;
+        _resolveDynamicColor(controller.media.value, allowExtract: true);
+        if (mounted) setState(() {});
+      }
+    });
   }
 
   @override
   void dispose() {
-    pageController.dispose();
+    _mediaColorWorker?.dispose();
     Get.delete<MediaDetailsController>(tag: widget.tag);
+    final isPreloaded = CommentPreloader.to.isPreloaded(widget.media.uniqueId);
+    if (!isPreloaded &&
+        Get.isRegistered<CommentSectionController>(
+            tag: widget.media.uniqueId)) {
+      Get.delete<CommentSectionController>(tag: widget.media.uniqueId);
+    }
+    if (Platform.isWindows) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        AnymeXTitleBar.isTransparent.value = false;
+      });
+    }
     super.dispose();
   }
 
   void _onTabSelected(int index) {
     if (controller.selectedPage.value == index) return;
     controller.selectedPage.value = index;
-    _isAnimatingPage = true;
-    pageController
-        .animateToPage(
-      index,
-      duration: const Duration(milliseconds: 250),
-      curve: Curves.easeInOut,
-    )
-        .then((_) {
-      _isAnimatingPage = false;
-    });
   }
 
   @override
   Widget build(BuildContext context) {
-    return AnymeXScaffold(
-      extendBody: true,
-      bottomNavigationBar: buildBottomNavBar(context),
-      body: ScrollConfiguration(
-        behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-        child: Align(
-          alignment: Alignment.topCenter,
-          child: NestedScrollView(
-            headerSliverBuilder: (context, innerBoxIsScrolled) => [
-              SliverToBoxAdapter(
-                child: Obx(() => MediaHeader(
-                      tag: widget.tag,
-                      data: controller.media.value,
-                      posterUrl: controller.media.value.poster,
-                      userStatus: controller.mediaStatus.value,
-                      userProgress: '${controller.mediaProgress.value}',
-                      onShare: () => MediaShare.showOptions(
-                        context: context,
-                        baseMedia: controller.media.value,
-                        hydratedMedia: controller.media.value,
-                        isManga: controller.isManga || controller.isNovel,
-                      ),
-                    )),
-              ),
-              SliverToBoxAdapter(
-                child: Center(
-                  child: Column(
-                    children: [
-                      buildMediaQuickActions(context, controller),
-                      const SizedBox(height: 12),
-                    ],
+    return Obx(() {
+      final currentMedia = controller.media.value;
+      if (!_isRouteAnimating && _lastExtractedUrl == null) {
+        _resolveDynamicColor(currentMedia, allowExtract: true);
+      }
+
+      final activeColor = _posterColor.value.isNotEmpty
+          ? _posterColor.value
+          : (settingsController.usePosterForBlur ? currentMedia.color : '');
+      final posterSeed =
+          (activeColor.isNotEmpty && settingsController.usePosterColor)
+              ? AnymeXScaffold.parseColor(activeColor)
+              : null;
+      final posterScheme = posterSeed != null
+          ? _getPosterScheme(posterSeed, Theme.of(context).brightness)
+          : null;
+
+      Widget buildScaffold(BuildContext themedContext) {
+        return AnymeXScaffold(
+          extendBehindTitleBar: true,
+          color: _posterColor.value,
+          extendBody: true,
+          resizeToAvoidBottomInset: false,
+          bottomNavigationBar: buildBottomNavBar(themedContext),
+          body: Obx(() {
+            final blurScope = settingsController.detailsBlurScope;
+            final isMesh = settingsController.detailsBlurStyle == 1;
+            final isBaked = isMesh || settingsController.useComputedBlur;
+            final blurAmount =
+                UISettingsKeys.detailsBlurAmount.get<double>(20.0);
+            final brightness =
+                UISettingsKeys.detailsBackdropBrightness.get<double>(1.0);
+            final media = controller.media.value;
+            final posterUrl = media.poster;
+            final effectiveCover =
+                (media.cover?.isNotEmpty == true ? media.cover! : posterUrl);
+            final usePoster = settingsController.usePosterForBlur;
+            final blurSourceUrl = usePoster ? posterUrl : effectiveCover;
+            final blurFallbackUrl = usePoster ? effectiveCover : posterUrl;
+            final tintBlur = settingsController.tintBlur;
+            final colors = themedContext.colors;
+            final blurColor = tintBlur ? colors.primary.opaque(0.4) : null;
+            final isDark =
+                Theme.of(themedContext).brightness == Brightness.dark;
+            final baseArtworkColor = tintBlur
+                ? colors.primary
+                : (AnymeXScaffold.parseColor(_posterColor.value) ??
+                    colors.primary);
+            final gradientBgColor = Color.alphaBlend(
+              baseArtworkColor.withValues(alpha: isDark ? 0.20 : 0.12),
+              colors.surface,
+            );
+
+            final scrollView = ScrollConfiguration(
+              behavior: ScrollConfiguration.of(themedContext)
+                  .copyWith(scrollbars: false),
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: CustomScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(
+                    parent: BouncingScrollPhysics(),
                   ),
+                  slivers: [
+                    SliverToBoxAdapter(
+                      child: Obx(() => MediaHeader(
+                            tag: widget.tag,
+                            data: controller.media.value,
+                            posterUrl: controller.media.value.poster,
+                            userStatus: controller.mediaStatus.value,
+                            userProgress: '${controller.mediaProgress.value}',
+                            extendBehindTitleBar: Platform.isWindows,
+                            onShare: () => MediaShare.showOptions(
+                              context: themedContext,
+                              baseMedia: controller.media.value,
+                              hydratedMedia: controller.media.value,
+                              isManga: controller.isManga || controller.isNovel,
+                            ),
+                          )),
+                    ),
+                    SliverToBoxAdapter(
+                      child: Center(
+                        child: Column(
+                          children: [
+                            buildMediaQuickActions(themedContext, controller)
+                                .animateSpring(
+                                    delay: const Duration(milliseconds: 100)),
+                            const SizedBox(height: 12),
+                          ],
+                        ),
+                      ),
+                    ),
+                    Obx(() {
+                      final selected = controller.selectedPage.value;
+                      return SliverMainAxisGroup(
+                        slivers: [
+                          SliverVisibility(
+                            visible: selected == 0,
+                            maintainState: true,
+                            sliver: _buildOverviewTab(themedContext),
+                          ),
+                          SliverVisibility(
+                            visible: selected == 1,
+                            maintainState: true,
+                            sliver: _buildContentTab(themedContext),
+                          ),
+                          SliverVisibility(
+                            visible: selected == 2,
+                            maintainState: true,
+                            sliver: _buildCommentsTab(themedContext),
+                          ),
+                        ],
+                      );
+                    }),
+                  ],
                 ),
               ),
-            ],
-            body: PageView(
-              controller: pageController,
-              physics: const BouncingScrollPhysics(),
-              onPageChanged: (index) {
-                if (!_isAnimatingPage) {
-                  controller.selectedPage.value = index;
-                }
-              },
+            );
+
+            Widget buildBlurredImage({double? height}) {
+              if (blurSourceUrl.isEmpty || _isRouteAnimating) {
+                return Container(
+                  height: height ?? double.infinity,
+                  width: double.infinity,
+                  color: gradientBgColor,
+                );
+              }
+              return isBaked
+                  ? BakedBlurImage(
+                      url: blurSourceUrl,
+                      fallback: blurFallbackUrl,
+                      saturation: 1.0,
+                      blurAmount: blurAmount,
+                      brightness: brightness,
+                      color: blurColor,
+                      fit: BoxFit.cover,
+                      height: height,
+                      width: double.infinity,
+                      fadeBottom: true,
+                      isMesh: isMesh,
+                    )
+                  : ColorFiltered(
+                      colorFilter: ColorFilter.matrix([
+                        brightness, 0, 0, 0, 0,
+                        0, brightness, 0, 0, 0,
+                        0, 0, brightness, 0, 0,
+                        0, 0, 0, 1, 0,
+                      ]),
+                      child: ImageFiltered(
+                        imageFilter: ImageFilter.blur(
+                            sigmaX: blurAmount, sigmaY: blurAmount),
+                        child: AnymeXImage(
+                          imageUrl: blurSourceUrl,
+                          errorImage: blurFallbackUrl,
+                          radius: 0,
+                          fit: BoxFit.cover,
+                          width: double.infinity,
+                          height: height ?? double.infinity,
+                          color: blurColor,
+                        ),
+                      ),
+                    );
+            }
+
+            if (blurScope == 0) {
+              return scrollView;
+            }
+
+            if (blurScope == 2) {
+              final washHeight = (MediaQuery.sizeOf(themedContext).height * 0.48)
+                  .clamp(320.0, 520.0);
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned.fill(
+                    child: Container(
+                      color: gradientBgColor,
+                    ),
+                  ),
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: washHeight,
+                    child: RepaintBoundary(
+                      child: buildBlurredImage(height: washHeight),
+                    ),
+                  ),
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: washHeight + 1.0,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          stops: const [0.0, 0.30, 0.60, 0.85, 1.0],
+                          colors: [
+                            gradientBgColor.withValues(
+                                alpha: isDark ? 0.30 : 0.10),
+                            gradientBgColor.withValues(
+                                alpha: isDark ? 0.55 : 0.25),
+                            gradientBgColor.withValues(
+                                alpha: isDark ? 0.85 : 0.65),
+                            gradientBgColor,
+                            gradientBgColor,
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  scrollView,
+                ],
+              );
+            }
+
+            return Stack(
+              fit: StackFit.expand,
               children: [
-                _buildOverviewTab(context),
-                _buildContentTab(context),
-                _buildCommentsTab(context),
+                Positioned.fill(
+                  child: RepaintBoundary(
+                    child: buildBlurredImage(),
+                  ),
+                ),
+                Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          colors.surface.withValues(alpha: 0.40),
+                          colors.surface.withValues(alpha: 0.65),
+                          colors.surface.withValues(alpha: 0.90),
+                        ],
+                        stops: const [0.0, 0.45, 1.0],
+                      ),
+                    ),
+                  ),
+                ),
+                scrollView,
               ],
-            ),
-          ),
-        ),
-      ),
-    );
+            );
+          }),
+        );
+      }
+
+      if (posterScheme != null) {
+        return Theme(
+          data: Theme.of(context).copyWith(colorScheme: posterScheme),
+          child: Builder(builder: (ctx) => buildScaffold(ctx)),
+        );
+      }
+      return buildScaffold(context);
+    });
   }
 
   Widget buildBottomNavBar(BuildContext context) {
@@ -181,10 +508,17 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
       final selected = controller.selectedPage.value;
       final isDesktop =
           getResponsiveValue(context, mobileValue: false, desktopValue: true);
+
       final child = Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _buildContinueButton(context),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOutCubic,
+            child: selected == 1
+                ? _buildContinueButton(context)
+                : const SizedBox.shrink(),
+          ),
           SafeArea(
             child: ResponsiveNavBar(
               isDesktop: false,
@@ -308,10 +642,7 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
 
       final rels = (mediaData.relations ?? []);
 
-      return CustomScrollView(
-        key: const PageStorageKey<String>('Overview'),
-        physics: const BouncingScrollPhysics(
-            parent: AlwaysScrollableScrollPhysics()),
+      return SliverMainAxisGroup(
         slivers: [
           SliverToBoxAdapter(
             child: Center(
@@ -322,25 +653,35 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
                     if (controller.isAnilistLoading.value) {
                       return _buildStatsShimmer(context).bottomSpacing(16);
                     }
-                    return buildMediaStatsSection(context, controller)
-                        .bottomSpacing(16);
+                    return KeyedSubtree(
+                      key: const ValueKey('media_stats'),
+                      child: buildMediaStatsSection(context, controller)
+                          .bottomSpacing(16)
+                          .animateSection(onScroll: false),
+                    );
                   }),
                   Obx(() {
                     if (controller.isAnilistLoading.value) {
                       return _buildShimmerCarousel(context);
                     }
-                    return buildCharactersSection(context, mediaData);
+                    return KeyedSubtree(
+                      key: const ValueKey('media_characters'),
+                      child: buildCharactersSection(context, mediaData),
+                    );
                   }),
                   Obx(() {
                     if (controller.isAnilistLoading.value) {
                       return _buildShimmerCarousel(context);
                     }
                     if (rels.isEmpty) return const SizedBox.shrink();
-                    return ReusableCarousel(
-                      data: rels,
-                      title: 'Relations',
-                      variant: DataVariant.relation,
-                    ).bottomSpacing(16);
+                    return KeyedSubtree(
+                      key: const ValueKey('media_relations'),
+                      child: ReusableCarousel(
+                        data: rels,
+                        title: 'Relations',
+                        variant: DataVariant.relation,
+                      ).bottomSpacing(16),
+                    );
                   }),
                   Obx(() {
                     if (controller.isSecondaryLoading.value) {
@@ -349,8 +690,11 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
                     if (mediaData.staff == null || mediaData.staff!.isEmpty) {
                       return const SizedBox.shrink();
                     }
-                    return StaffCarousel(staff: mediaData.staff!)
-                        .bottomSpacing(16);
+                    return KeyedSubtree(
+                      key: const ValueKey('media_staff'),
+                      child: StaffCarousel(staff: mediaData.staff!)
+                          .bottomSpacing(16),
+                    );
                   }),
                   Obx(() {
                     if (controller.isAnilistLoading.value) {
@@ -358,19 +702,22 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
                     }
                     final recs = mediaData.recommendations;
                     if (recs.isEmpty) return const SizedBox.shrink();
-                    return ReusableCarousel(
-                      data: recs,
-                      title: controller.isNovel
-                          ? 'Recommended Novels'
-                          : (controller.isAnime
-                              ? 'Recommended Anime'
-                              : 'Recommended Manga'),
-                      variant: DataVariant.recommendation,
-                      type: controller.isNovel
-                          ? ItemType.novel
-                          : (controller.isAnime
-                              ? ItemType.anime
-                              : ItemType.manga),
+                    return KeyedSubtree(
+                      key: const ValueKey('media_recommendations'),
+                      child: ReusableCarousel(
+                        data: recs,
+                        title: controller.isNovel
+                            ? 'Recommended Novels'
+                            : (controller.isAnime
+                                ? 'Recommended Anime'
+                                : 'Recommended Manga'),
+                        variant: DataVariant.recommendation,
+                        type: controller.isNovel
+                            ? ItemType.novel
+                            : (controller.isAnime
+                                ? ItemType.anime
+                                : ItemType.manga),
+                      ),
                     );
                   }),
                 ],
@@ -385,10 +732,7 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
 
   Widget _buildContentTab(BuildContext context) {
     if (controller.isAnime) {
-      return CustomScrollView(
-        key: const PageStorageKey<String>('Content'),
-        physics: const BouncingScrollPhysics(
-            parent: AlwaysScrollableScrollPhysics()),
+      return SliverMainAxisGroup(
         slivers: [
           EpisodeSection(
             searchedTitle: controller.searchedTitle,
@@ -410,10 +754,7 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
       );
     }
 
-    return CustomScrollView(
-      key: const PageStorageKey<String>('Content'),
-      physics:
-          const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+    return SliverMainAxisGroup(
       slivers: [
         ChapterSection(
           searchedTitle: controller.searchedTitle,
@@ -428,32 +769,264 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
   }
 
   Widget _buildCommentsTab(BuildContext context) {
-    return Obx(() {
-      if (controller.isLoading.value) {
-        return const Center(
-          child: Padding(
-            padding: EdgeInsets.all(40),
-            child: ExpressiveLoadingIndicator(),
-          ),
-        );
-      }
+    final commentCtrl = _commentController;
+    final colorScheme = Theme.of(context).colorScheme;
+    final media = controller.media.value;
 
-      return CustomScrollView(
-        key: const PageStorageKey<String>('Comments'),
-        physics: const BouncingScrollPhysics(
-            parent: AlwaysScrollableScrollPhysics()),
-        slivers: [
-          SliverToBoxAdapter(
-            child: Center(
-              child: CommentSection(
-                media: controller.media.value,
+    final String formatName;
+    switch (media.mediaType) {
+      case ItemType.anime:
+        formatName = 'Anime';
+        break;
+      case ItemType.novel:
+        formatName = 'Novel';
+        break;
+      default:
+        formatName = 'Manga';
+        break;
+    }
+
+    return SliverMainAxisGroup(
+      slivers: [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: colorScheme.surfaceContainerHighest
+                    .opaque(0.25, iReallyMeanIt: true),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: colorScheme.onSurface.opaque(0.08, iReallyMeanIt: true),
+                  width: 1,
+                ),
+              ),
+              child: Row(
+                children: [
+                  if (media.poster.isNotEmpty)
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: AnymeXImage(
+                        imageUrl: media.poster,
+                        width: 34,
+                        height: 46,
+                        fit: BoxFit.cover,
+                      ),
+                    )
+                  else
+                    AnymeXContainer(
+                      width: 34,
+                      height: 46,
+                      color: colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Icon(
+                        Icons.forum_outlined,
+                        size: 20,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AnymeXText(
+                          media.displayTitle.isNotEmpty ? media.displayTitle : 'Comments',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          size: 15,
+                          variant: TextVariant.bold,
+                          color: colorScheme.onSurface,
+                        ),
+                        const SizedBox(height: 3),
+                        Row(
+                          children: [
+                            AnymeXContainer(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              color: colorScheme.primary.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(4),
+                              child: AnymeXText(
+                                formatName,
+                                size: 10,
+                                variant: TextVariant.bold,
+                                color: colorScheme.primary,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Obx(() {
+                              final count = commentCtrl.commentCount.value;
+                              return AnymeXText(
+                                '$count ${count == 1 ? 'comment' : 'comments'}',
+                                size: 12,
+                                color: colorScheme.onSurfaceVariant,
+                              );
+                            }),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  PopupMenuButton<String>(
+                    onSelected: (sort) => commentCtrl.setSort(sort),
+                    icon: Icon(
+                      Icons.sort_rounded,
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                    tooltip: 'Sort comments',
+                    itemBuilder: (context) => [
+                      PopupMenuItem(
+                        value: 'top',
+                        child: Row(
+                          children: [
+                            if (commentCtrl.currentSort.value == 'top')
+                              Icon(Icons.check_rounded,
+                                  size: 18, color: colorScheme.primary)
+                            else
+                              const SizedBox(width: 18),
+                            const SizedBox(width: 8),
+                            const AnymeXText('Top comments', maxLines: null),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'newest',
+                        child: Row(
+                          children: [
+                            if (commentCtrl.currentSort.value == 'newest')
+                              Icon(Icons.check_rounded,
+                                  size: 18, color: colorScheme.primary)
+                            else
+                              const SizedBox(width: 18),
+                            const SizedBox(width: 8),
+                            const AnymeXText('Newest first', maxLines: null),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'oldest',
+                        child: Row(
+                          children: [
+                            if (commentCtrl.currentSort.value == 'oldest')
+                              Icon(Icons.check_rounded,
+                                  size: 18, color: colorScheme.primary)
+                            else
+                              const SizedBox(width: 18),
+                            const SizedBox(width: 8),
+                            const AnymeXText('Oldest first', maxLines: null),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.emoji_events_outlined, size: 21),
+                    onPressed: () => LeaderboardSheet.show(context),
+                    tooltip: 'Leaderboard',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.assignment_outlined, size: 20),
+                    onPressed: () =>
+                        showPolicySheet(context, PolicyType.commentRules),
+                    tooltip: 'Comment Rules',
+                  ),
+                  Obx(() => IconButton(
+                        icon: commentCtrl.isRefreshing.value
+                            ? SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              )
+                            : const Icon(Icons.refresh_rounded, size: 20),
+                        onPressed: commentCtrl.isRefreshing.value
+                            ? null
+                            : () => commentCtrl.forceRefresh(),
+                        tooltip: 'Refresh comments',
+                      )),
+                ],
               ),
             ),
           ),
-          const SliverToBoxAdapter(child: SizedBox(height: 250)),
+        ),
+        SliverToBoxAdapter(
+          child: Obx(() {
+            if (!serviceHandler.isLoggedIn.value) {
+              return _buildLoginToCommentCard(context);
+            }
+            return CommentInputBar(
+              controller: commentCtrl,
+              focusNode: commentCtrl.commentFocusNode,
+            );
+          }),
+        ),
+        SliverToBoxAdapter(
+          child: CommentSection(
+            media: media,
+            scrollToCommentId: widget.scrollToCommentId,
+            showInlineInput: false,
+            showHeader: false,
+          ),
+        ),
+        const SliverToBoxAdapter(child: SizedBox(height: 120)),
+      ],
+    );
+  }
+
+  Widget _buildLoginToCommentCard(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    return AnymeXContainer(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      color: colorScheme.surfaceContainerHighest.opaque(0.25, iReallyMeanIt: true),
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(
+        color: colorScheme.onSurface.opaque(0.08, iReallyMeanIt: true),
+        width: 1,
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.lock_outline_rounded,
+            size: 22,
+            color: colorScheme.primary,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: AnymeXText(
+              'Log in to join the conversation and comment.',
+              size: 13,
+              color: colorScheme.onSurfaceVariant,
+              maxLines: 2,
+            ),
+          ),
+          const SizedBox(width: 12),
+          InkWell(
+            onTap: () => serviceHandler.login(context),
+            borderRadius: BorderRadius.circular(20),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: colorScheme.primary,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: AnymeXText(
+                'Log In',
+                size: 13,
+                variant: TextVariant.semiBold,
+                color: colorScheme.onPrimary,
+              ),
+            ),
+          ),
         ],
-      );
-    });
+      ),
+    );
   }
 
   Widget _buildContinueButton(BuildContext context) {
@@ -471,7 +1044,6 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
       if (!showButton) return const SizedBox.shrink();
 
       String titleText = '';
-      String subtitleText = '';
       String imageUrl = '';
       double progressVal = 0.0;
       VoidCallback? onTap;
@@ -482,16 +1054,22 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
         final matchedEp = controller.episodeList.firstWhereOrNull((e) =>
             (e.link != null && e.link!.isNotEmpty && e.link == ep.link) ||
             e.isSameEpisode(ep));
-        final title = (matchedEp?.title?.isNotEmpty == true)
-            ? matchedEp!.title!
-            : (ep.title?.isNotEmpty == true ? ep.title! : 'Episode ${ep.number}');
-        titleText = title;
-        subtitleText = 'Episode ${ep.number}';
+        final episodeNumber =
+            formatEpisodeNumberLabel(ep.number, title: ep.title);
+        final rawEpTitle = (matchedEp?.title?.trim().isNotEmpty == true)
+            ? matchedEp!.title!.trim()
+            : (ep.title?.trim() ?? '');
+        final hasSpecificTitle = rawEpTitle.isNotEmpty &&
+            !rawEpTitle.toLowerCase().startsWith('episode');
+        titleText = hasSpecificTitle
+            ? 'EP $episodeNumber - $rawEpTitle'
+            : 'Episode $episodeNumber';
         imageUrl = ep.thumbnail?.isNotEmpty == true
             ? ep.thumbnail!
             : controller.media.value.poster;
         progressVal = controller.getEpisodeProgress(ep);
         onTap = () async {
+          HapticFeedback.lightImpact();
           await EpisodeListBuilder.showServerSheet(
             context,
             episode: ep,
@@ -506,14 +1084,18 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
         final matchedCh = controller.chapterList.firstWhereOrNull((c) =>
             (c.link != null && c.link!.isNotEmpty && c.link == ch.link) ||
             (c.number != null && c.number == ch.number));
-        final title = (matchedCh?.title?.isNotEmpty == true)
-            ? matchedCh!.title!
-            : (ch.title?.isNotEmpty == true ? ch.title! : 'Chapter ${ch.number}');
-        titleText = title;
-        subtitleText = 'Chapter ${ch.number}';
+        final rawChTitle = (matchedCh?.title?.trim().isNotEmpty == true)
+            ? matchedCh!.title!.trim()
+            : (ch.title?.trim() ?? '');
+        final hasSpecificTitle = rawChTitle.isNotEmpty &&
+            !rawChTitle.toLowerCase().startsWith('chapter');
+        titleText = hasSpecificTitle
+            ? 'CH ${ch.number} - $rawChTitle'
+            : 'Chapter ${ch.number}';
         imageUrl = controller.media.value.poster;
         progressVal = controller.getChapterProgress(ch);
         onTap = () async {
+          HapticFeedback.lightImpact();
           final activeSource = controller.activeSource.value;
           if (activeSource == null) return;
           if (controller.isNovel) {
@@ -572,14 +1154,7 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
       }
 
       final clampedProgress = progressVal.clamp(0.0, 1.0);
-      final hasLocalProgress = clampedProgress > 0;
-      final isAddedToTracker =
-          controller.isListedMedia.value || controller.mediaProgress.value > 0;
-      final showContinue = hasLocalProgress || isAddedToTracker;
-
-      final playButtonText = showContinue
-          ? (isAnime ? 'Continue Watching' : 'Continue Reading')
-          : (isAnime ? 'Start Watching' : 'Start Reading');
+      final theme = Theme.of(context);
 
       return TweenAnimationBuilder<double>(
         tween: Tween(begin: 0.0, end: 1.0),
@@ -594,250 +1169,97 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
             ),
           );
         },
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: context.colors.surfaceContainer.withValues(alpha: 0.8),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: context.colors.onSurface.opaque(0.12, iReallyMeanIt: true),
-              width: 0.8,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.25),
-                blurRadius: 16,
-                offset: const Offset(0, 4),
-              ),
-            ],
-          ),
-          child: AnimatedSize(
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeInOut,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Row(
-                  children: [
-                    InkWell(
-                      onTap: onTap,
-                      borderRadius: BorderRadius.circular(16),
-                      child: Padding(
-                        padding: const EdgeInsets.all(6.0),
-                        child: Icon(
-                          isAnime
-                              ? Icons.play_circle_fill_rounded
-                              : Icons.menu_book_rounded,
-                          size: 24,
-                          color: context.colors.primary,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: InkWell(
-                        onTap: () {
-                          setState(() {
-                            _isContinueExpanded = !_isContinueExpanded;
-                          });
-                        },
-                        borderRadius: BorderRadius.circular(8),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 4.0, horizontal: 4.0),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              AnymeXText(
-                                playButtonText,
-                                variant: TextVariant.bold,
-                                size: 13,
-                                color: context.colors.onSurface,
-                              ),
-                              const SizedBox(height: 1),
-                              AnymeXText(
-                                clampedProgress > 0
-                                    ? '$subtitleText • ${(clampedProgress * 100).toInt()}% ${isAnime ? 'watched' : 'read'}'
-                                    : subtitleText,
-                                size: 11,
-                                color: context.colors.onSurface
-                                    .opaque(0.6, iReallyMeanIt: true),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      visualDensity: VisualDensity.compact,
-                      onPressed: () {
-                        setState(() {
-                          _isContinueExpanded = !_isContinueExpanded;
-                        });
-                      },
-                      icon: Icon(
-                        _isContinueExpanded
-                            ? Icons.keyboard_arrow_up_rounded
-                            : Icons.keyboard_arrow_down_rounded,
-                        color: context.colors.onSurface
-                            .opaque(0.6, iReallyMeanIt: true),
-                      ),
-                    ),
-                  ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          child: GestureDetector(
+            onTap: onTap,
+            behavior: HitTestBehavior.opaque,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              height: 52,
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.secondaryContainer
+                    .opaque(0.4, iReallyMeanIt: true),
+                borderRadius: BorderRadius.circular(24.multiplyRadius()),
+                border: Border.all(
+                  color: theme.colorScheme.outline
+                      .opaque(0.12, iReallyMeanIt: true),
+                  width: 0.8,
                 ),
-                if (_isContinueExpanded) ...[
-                  const SizedBox(height: 12),
-                  const Divider(height: 1, thickness: 0.5),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: SizedBox(
-                          width: 80,
-                          height: 48,
-                          child: AnymeXImage(
-                            imageUrl: imageUrl,
-                            fit: BoxFit.cover,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.opaque(0.12, iReallyMeanIt: true),
+                    blurRadius: 16,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: SizedBox(
+                      width: 60,
+                      height: 38,
+                      child: AnymeXImage(
+                        imageUrl: imageUrl,
+                        fit: BoxFit.cover,
+                        radius: 0,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AnymeXText(
+                          titleText,
+                          size: 11.5,
+                          variant: TextVariant.semiBold,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          isMarquee: true,
+                        ),
+                        const SizedBox(height: 5),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(50),
+                          child: AnymeXLinearIndicator(
+                            value: clampedProgress > 0 ? clampedProgress : 0.05,
+                            minHeight: 8,
+                            color: theme.colorScheme.primary,
+                            backgroundColor:
+                                theme.colorScheme.onSurface.withOpacity(0.1),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            AnymeXText(
-                              titleText,
-                              variant: TextVariant.bold,
-                              size: 13,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 2),
-                            Wrap(
-                              spacing: 2,
-                              runSpacing: 2,
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: context.colors.secondary,
-                                    borderRadius: clampedProgress > 0
-                                        ? const BorderRadius.horizontal(
-                                            left: Radius.circular(8),
-                                            right: Radius.circular(5),
-                                          )
-                                        : BorderRadius.circular(8),
-                                  ),
-                                  child: AnymeXText(
-                                    subtitleText.toUpperCase(),
-                                    style: TextStyle(
-                                      fontFamily: 'Linotte',
-                                      fontSize: 10.0,
-                                      color: context.colors.secondary
-                                                  .computeLuminance() >
-                                              0.5
-                                          ? Colors.black
-                                          : Colors.white,
-                                    ),
-                                  ),
-                                ),
-                                if (clampedProgress > 0)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 8, vertical: 3),
-                                    decoration: BoxDecoration(
-                                      color: context.colors.tertiary,
-                                      borderRadius: const BorderRadius.horizontal(
-                                        left: Radius.circular(5),
-                                        right: Radius.circular(8),
-                                      ),
-                                    ),
-                                    child: AnymeXText(
-                                      '${(clampedProgress * 100).toInt()}% ${isAnime ? 'WATCHED' : 'READ'}',
-                                      style: TextStyle(
-                                        fontFamily: 'Linotte',
-                                        fontSize: 10.0,
-                                        color: context.colors.tertiary
-                                                    .computeLuminance() >
-                                                0.5
-                                            ? Colors.black
-                                            : Colors.white,
-                                      ),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 12),
-                  AnymexOnTap(
+                  const SizedBox(width: 10),
+                  GestureDetector(
                     onTap: onTap,
                     child: Container(
-                      width: double.infinity,
-                      clipBehavior: Clip.antiAlias,
+                      height: 32,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
                       decoration: BoxDecoration(
-                        color: context.colors.primary.withValues(alpha: 0.08),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: context.colors.primary.withValues(alpha: 0.2),
-                          width: 1,
-                        ),
+                        color: theme.colorScheme.primary.opaque(0.9),
+                        borderRadius:
+                            BorderRadius.circular(32.multiplyRadius()),
                       ),
-                      child: LayoutBuilder(
-                        builder: (context, constraints) {
-                          final width = constraints.maxWidth;
-                          return Stack(
-                            children: [
-                              if (clampedProgress > 0)
-                                Positioned(
-                                  left: 0,
-                                  top: 0,
-                                  bottom: 0,
-                                  width: width * clampedProgress,
-                                  child: Container(
-                                    color: context.colors.primary
-                                        .withValues(alpha: 0.22),
-                                  ),
-                                ),
-                              Padding(
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 10),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Icon(
-                                      isAnime
-                                          ? Icons.play_arrow_rounded
-                                          : Icons.menu_book_rounded,
-                                      size: 18,
-                                      color: context.colors.primary,
-                                    ),
-                                    const SizedBox(width: 6),
-                                    AnymeXText(
-                                      playButtonText,
-                                      variant: TextVariant.bold,
-                                      size: 13,
-                                      color: context.colors.primary,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          );
-                        },
+                      child: Icon(
+                        isAnime
+                            ? Icons.play_arrow_rounded
+                            : Icons.menu_book_rounded,
+                        size: 16,
+                        color: theme.colorScheme.onPrimary,
                       ),
                     ),
                   ),
                 ],
-              ],
+              ),
             ),
           ),
         ),

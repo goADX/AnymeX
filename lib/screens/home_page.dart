@@ -4,9 +4,11 @@ import 'package:anymex/controllers/offline/offline_storage_controller.dart';
 import 'package:anymex/controllers/service_handler/service_handler.dart';
 import 'package:anymex/controllers/settings/settings.dart';
 import 'package:anymex/controllers/source/source_controller.dart';
+import 'package:anymex/database/data_keys/keys.dart';
 import 'package:anymex/utils/theme_extensions.dart';
 import 'package:anymex/widgets/common/reusable_carousel.dart';
 import 'package:anymex/widgets/common/scroll_aware_app_bar.dart';
+import 'package:anymex/widgets/dialogs/donation_dialog.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_textspan.dart';
 import 'package:anymex/widgets/header/header.dart';
@@ -163,6 +165,29 @@ class _HomePageState extends State<HomePage> {
     _workers.add(ever(serviceHandler.isLoggedIn, (_) {
       if (mounted) setState(() {});
     }));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkAndShowDonationDialog();
+    });
+  }
+
+  void _checkAndShowDonationDialog() {
+    if (!mounted) return;
+    final hasShown = General.hasShownHomeDonationDialog.get<bool>(false);
+    if (hasShown) return;
+
+    if (General.isFirstTime.get<bool>(true)) {
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) _checkAndShowDonationDialog();
+      });
+      return;
+    }
+
+    General.hasShownHomeDonationDialog.set(true);
+    Future.delayed(const Duration(milliseconds: 600), () {
+      if (mounted) {
+        DonationDialog.show(context);
+      }
+    });
   }
 
   ScrollController get scrollController => _scrollController;
@@ -211,20 +236,21 @@ class _HomePageState extends State<HomePage> {
         extendBodyBehindAppBar: true,
         body: Stack(
           children: [
-            SingleChildScrollView(
+            CustomScrollView(
               controller: _scrollController,
-              child: Column(
-                crossAxisAlignment: isMobile
-                    ? CrossAxisAlignment.center
-                    : CrossAxisAlignment.start,
-                children: [
-                  SizedBox(
-                    height: isDesktop ? 10 : statusBarHeight + appBarHeight,
+              cacheExtent: 200.0,
+              slivers: [
+                SliverToBoxAdapter(
+                  child: SizedBox(
+                    height: isDesktop ? 24.0 : statusBarHeight + appBarHeight + 10,
                   ),
-                  const SizedBox(height: 10),
-                  Obx(
+                ),
+                SliverToBoxAdapter(
+                  child: Obx(
                     () => Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                      padding: EdgeInsets.symmetric(
+                        horizontal: isDesktop ? 24.0 : 20.0,
+                      ),
                       child: AnymeXTextSpans(
                         fontSize: 27,
                         spans: [
@@ -247,14 +273,18 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                   ),
-                  Column(
+                ),
+                SliverToBoxAdapter(
+                  child: Column(
                     crossAxisAlignment: isMobile
                         ? CrossAxisAlignment.center
                         : CrossAxisAlignment.start,
                     children: [
                       const SizedBox(height: 10),
                       Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        padding: EdgeInsets.symmetric(
+                          horizontal: isDesktop ? 24.0 : 20.0,
+                        ),
                         child: AnymeXText(
                           'Find your favourite anime or manga, manhwa or whatever you like!',
                           style: TextStyle(
@@ -267,26 +297,36 @@ class _HomePageState extends State<HomePage> {
                         ),
                       ),
                       const SizedBox(height: 30),
-                      Column(
-                        children: _buildHomeWidgets(
-                          context: context,
-                          serviceHandler: serviceHandler,
-                          offlineStorageController: offlineStorageController,
-                          settings: settings,
-                        ),
-                      ),
-                      if (novelData.isNotEmpty)
-                        ReusableCarousel(
-                          title: "Recommended Novels",
-                          data: novelData,
-                          type: ItemType.novel,
-                          source: sourceController.activeNovelSource.value,
-                        ),
                     ],
                   ),
-                  SizedBox(height: bottomNavBarHeight + 150),
-                ],
-              ),
+                ),
+                () {
+                  final homeWidgets = _buildHomeWidgets(
+                    context: context,
+                    serviceHandler: serviceHandler,
+                    offlineStorageController: offlineStorageController,
+                    settings: settings,
+                  );
+                  return SliverList.builder(
+                    itemCount: homeWidgets.length,
+                    itemBuilder: (context, index) => RepaintBoundary(
+                      child: homeWidgets[index],
+                    ),
+                  );
+                }(),
+                if (novelData.isNotEmpty)
+                  SliverToBoxAdapter(
+                    child: ReusableCarousel(
+                      title: "Recommended Novels",
+                      data: novelData,
+                      type: ItemType.novel,
+                      source: sourceController.activeNovelSource.value,
+                    ),
+                  ),
+                SliverToBoxAdapter(
+                  child: SizedBox(height: bottomNavBarHeight + 150),
+                ),
+              ],
             ),
             if (!isDesktop)
               CustomAnimatedAppBar(

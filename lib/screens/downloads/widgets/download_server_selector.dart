@@ -3,6 +3,7 @@ import 'package:anymex/screens/downloads/controller/download_controller.dart';
 import 'package:anymex/screens/downloads/model/download_models.dart';
 import 'package:anymex/database/isar_models/episode.dart';
 import 'package:anymex/database/isar_models/video.dart' as hive;
+import 'package:anymex/utils/language.dart';
 import 'package:anymex/utils/theme_extensions.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
 import 'package:anymex/widgets/helper/tv_wrapper.dart';
@@ -13,6 +14,9 @@ import 'package:expressive_loading_indicator/expressive_loading_indicator.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:anymex/screens/downloads/widgets/download_permission_dialog.dart';
+import 'package:anymex/screens/downloads/widgets/torrent_file_selector_sheet.dart';
+import 'package:anymex/controllers/services/torrent/torrent_service.dart';
+import 'package:anymex/widgets/non_widgets/torrent_server_overlay.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_bottomsheet.dart';
 import 'package:hugeicons/hugeicons.dart';
 
@@ -20,12 +24,14 @@ class DownloadServerSelector extends StatefulWidget {
   final List<Episode> episodes;
   final Source source;
   final OfflineMedia media;
+  final bool isFromMetadataPage;
 
   const DownloadServerSelector({
     super.key,
     required this.episodes,
     required this.source,
     required this.media,
+    this.isFromMetadataPage = true,
   });
 
   static Future<bool> show(
@@ -33,6 +39,7 @@ class DownloadServerSelector extends StatefulWidget {
     required List<Episode> episodes,
     required Source source,
     required OfflineMedia media,
+    bool isFromMetadataPage = true,
   }) async {
     if (!await DownloadPermissionDialog.checkAndPrompt(context)) {
       return false;
@@ -43,6 +50,7 @@ class DownloadServerSelector extends StatefulWidget {
         episodes: episodes,
         source: source,
         media: media,
+        isFromMetadataPage: isFromMetadataPage,
       ),
       context,
       showDragHandle: true,
@@ -145,22 +153,61 @@ class _DownloadServerSelectorState extends State<DownloadServerSelector> {
   Future<void> _startDownload() async {
     final downloadController = Get.find<DownloadController>();
     if (_selectedQuality.value == null) return;
-    
+
     if (_cancelToken != null) {
       widget.source.cancelRequest(_cancelToken!);
     }
+
+    final selectedVideo = _servers
+        .firstWhereOrNull((v) => v.quality == _selectedQuality.value);
+    final videoUrl = selectedVideo?.url ?? selectedVideo?.originalUrl ?? '';
+    final isTorrent = isTorrentUrl(videoUrl);
+    String? finalVideoUrl = widget.episodes.length == 1 ? videoUrl : null;
+
+    if (isTorrent) {
+      try {
+        final addon = await TorrentService.instance.ensureTorrServerReady(
+          contextMessage: 'Preparing torrent for download...',
+        );
+        TorrentServerOverlay.dismiss();
+
+        if (context.mounted) {
+          final chosenFile = await AnymeXSheet.custom<int>(
+            TorrentFileSelectorSheet(
+              addon: addon,
+              url: videoUrl,
+              title: widget.media.name ?? '',
+            ),
+            context,
+            showDragHandle: true,
+          );
+          if (chosenFile != null && chosenFile != torrentFileAuto) {
+            final info = await addon.addForDownload(
+                url: videoUrl, title: widget.media.name ?? '');
+            finalVideoUrl = addon.fileUrl(info.hash, chosenFile).toString();
+          }
+        }
+      } catch (e) {
+        TorrentServerOverlay.dismiss();
+        snackBar('Failed to prepare torrent: $e');
+        return;
+      }
+    }
+
+    if (!context.mounted) return;
     Navigator.pop(context, true);
-    
-    final selectedVideo = _servers.firstWhereOrNull((v) => v.quality == _selectedQuality.value);
 
     await downloadController.enqueueDownloadBatch(
       episodes: widget.episodes,
       source: widget.source,
       media: widget.media,
       preferredQuality: _selectedQuality.value!,
-      firstEpisodeVideoUrl: widget.episodes.length == 1 ? (selectedVideo?.url ?? selectedVideo?.originalUrl) : null,
-      firstEpisodeHeaders: widget.episodes.length == 1 ? selectedVideo?.headers : null,
-      firstEpisodeSubtitles: widget.episodes.length == 1 ? selectedVideo?.subtitles : null,
+      firstEpisodeVideoUrl: finalVideoUrl,
+      firstEpisodeHeaders:
+          widget.episodes.length == 1 ? selectedVideo?.headers : null,
+      firstEpisodeSubtitles:
+          widget.episodes.length == 1 ? selectedVideo?.subtitles : null,
+      isFromMetadataPage: widget.isFromMetadataPage,
     );
     snackBar(
       'Downloading ${widget.episodes.length} episode${widget.episodes.length != 1 ? 's' : ''}...',
@@ -209,7 +256,8 @@ class _DownloadServerSelectorState extends State<DownloadServerSelector> {
                 const AnymeXText('Choose Quality',
                     variant: TextVariant.bold,
                     size: 16),
-                AnymeXText('Fetching from first episode · auto-matched for batch',
+                AnymeXText(
+                  '${widget.source.name ?? 'Unknown'}${widget.source.lang != null && widget.source.lang!.isNotEmpty ? ' (${completeLanguageName(widget.source.lang!)})' : ''} · auto-matched for batch',
                   size: 12,
                   color: theme.onSurface.opaque(0.5),
                 ),

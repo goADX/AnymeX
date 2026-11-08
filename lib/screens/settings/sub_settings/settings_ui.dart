@@ -1,26 +1,25 @@
 import 'dart:io';
 
+import 'package:anymex/controllers/service_handler/service_handler.dart';
 import 'package:anymex/controllers/settings/settings.dart';
-import 'package:anymex/screens/settings/widgets/card_selector.dart';
-import 'package:anymex/screens/settings/widgets/history_card_selector.dart';
-import 'package:anymex/screens/settings/widgets/carousel_style_selector.dart';
-import 'package:anymex/screens/settings/widgets/navbar_selector.dart';
-import 'package:anymex/widgets/common/anymex_scaffold.dart';
+import 'package:anymex/screens/settings/sub_settings/card_customizer_page.dart';
+import 'package:anymex/screens/settings/sub_settings/settings_ui_components.dart';
+import 'package:anymex/screens/settings/sub_settings/settings_ui_details.dart';
+import 'package:anymex/utils/external_font_loader.dart';
+import 'package:anymex/utils/function.dart';
+import 'package:anymex/widgets/anymex_widgets/anymex_dialog.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_section_builder.dart';
+import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_tile.dart';
-import 'package:anymex/widgets/anymex_widgets/anymex_tile_builder.dart';
+import 'package:anymex/widgets/common/anymex_scaffold.dart';
 import 'package:anymex/widgets/helper/platform_builder.dart';
+import 'package:anymex/widgets/non_widgets/snackbar.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_iconly/flutter_iconly.dart';
 import 'package:get/get.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:iconsax/iconsax.dart';
-import 'package:anymex/controllers/service_handler/service_handler.dart';
-import 'package:anymex/widgets/anymex_widgets/anymex_dialog.dart';
-import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
-import 'package:anymex/widgets/non_widgets/snackbar.dart';
-import 'package:anymex/utils/external_font_loader.dart';
-import 'package:file_picker/file_picker.dart';
 
 class SettingsUi extends StatefulWidget {
   const SettingsUi({super.key});
@@ -67,6 +66,54 @@ class _SettingsUiState extends State<SettingsUi> {
                   () => Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      AnymeXSectionBuilder(
+                        title: 'Interface Styling',
+                        children: [
+                          AnymeXTile(
+                            icon: HugeIcons.strokeRoundedShapes,
+                            title: 'UI Components',
+                            subtitle:
+                                'Customize history card, carousel & nav bar styles',
+                            onTap: () =>
+                                navigate(() => const SettingsUiComponents()),
+                          ),
+                          AnymeXTile(
+                            icon: Icons.tune_rounded,
+                            title: 'Card Customizer',
+                            subtitle:
+                                'Customize carousel card styles, geometry, and layout',
+                            onTap: () =>
+                                navigate(() => const CardCustomizerPage()),
+                          ),
+                          AnymeXTile(
+                            icon: HugeIcons.strokeRoundedPlaySquare,
+                            title: 'Details Page',
+                            subtitle:
+                                'Configure poster blur, scope, tint & backdrop source',
+                            onTap: () =>
+                                navigate(() => const SettingsUiDetails()),
+                          ),
+                        ],
+                      ),
+                      AnymeXSectionBuilder(
+                        title: 'Navigation Layout',
+                        children: [
+                          AnymeXTile.pills<bool>(
+                            icon: Icons.view_sidebar_rounded,
+                            title: 'Nav Bar Layout',
+                            value: settings.useLegacyNavbar,
+                            options: const [false, true],
+                            optionLabelTransformer: (isLegacy) =>
+                                isLegacy ? 'Legacy' : 'Modern',
+                            optionDescriptionTransformer: (isLegacy) => isLegacy
+                                ? 'Simple direct tabs for Anime, Manga, and Novels.'
+                                : 'Floating category switcher with a dedicated History tab.',
+                            onChanged: (isLegacy) {
+                              settings.useLegacyNavbar = isLegacy;
+                            },
+                          ),
+                        ],
+                      ),
                       AnymeXSectionBuilder(
                         title: 'Common',
                         children: [
@@ -150,43 +197,6 @@ class _SettingsUiState extends State<SettingsUi> {
                         ],
                       ),
                       AnymeXSectionBuilder(
-                        title: 'Layout & Styles',
-                        children: [
-                          AnymeXTile(
-                            onTap: () => showCardStyleSwitcher(context),
-                            icon: Iconsax.card5,
-                            title: "Card Style",
-                            subtitle: "Customize media card presentation",
-                          ),
-                          AnymeXTile(
-                            onTap: () => showHistoryCardStyleSelector(context),
-                            icon: Iconsax.card5,
-                            title: "History Card Style",
-                            subtitle: "Customize history card presentation",
-                          ),
-                          AnymeXTile(
-                            onTap: () => showCarouselStyleSelector(context),
-                            icon: Icons.view_carousel_rounded,
-                            title: "Carousel Style",
-                            subtitle: "Change home screen hero carousel style",
-                          ),
-                          AnymeXTile(
-                            onTap: () => _showNavBarModeSwitcher(context),
-                            icon: Icons.view_sidebar_rounded,
-                            title: 'Nav Bar Layout',
-                            subtitle: settings.useLegacyNavbar
-                                ? 'Legacy (Direct Category Tabs)'
-                                : 'Modern (Discover & Floating Selector)',
-                          ),
-                          AnymeXTile(
-                            onTap: () => showNavBarStyleSwitcher(context),
-                            icon: Icons.navigation_rounded,
-                            title: 'Nav Bar Style',
-                            subtitle: 'Choose your navigation bar look',
-                          ),
-                        ],
-                      ),
-                      AnymeXSectionBuilder(
                         title: 'Extras',
                         children: [
                           AnymeXTile.slider(
@@ -248,32 +258,6 @@ class _SettingsUiState extends State<SettingsUi> {
                 ),
               )),
     );
-  }
-
-  void _showNavBarModeSwitcher(BuildContext context) {
-    AnymeXDialog(
-      title: 'Nav Bar Layout',
-      showCancelButton: false,
-      confirmText: 'Close',
-      onConfirm: () {},
-      contentWidget: SizedBox(
-        width: double.maxFinite,
-        child: Obx(() => AnymeXTileBuilder<bool>(
-              items: const [true, false],
-              selectedItem: settings.useLegacyNavbar,
-              getTitle: (isLegacy) =>
-                  isLegacy ? 'Legacy Nav Bar' : 'Modern Nav Bar',
-              getSubtitle: (isLegacy) => isLegacy
-                  ? 'Direct tabs for Anime, Manga, and Novels. History accessed from Library.'
-                  : 'Discover and Library tabs with floating media mode selector, separate History tab.',
-              onItemPressed: (isLegacy) {
-                settings.useLegacyNavbar = isLegacy;
-                Navigator.pop(context);
-                setState(() {});
-              },
-            )),
-      ),
-    ).show(context);
   }
 
   void _showReorderTabsDialog(BuildContext context) {

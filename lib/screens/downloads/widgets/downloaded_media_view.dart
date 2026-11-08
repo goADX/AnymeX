@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:anymex/controllers/offline/offline_storage_controller.dart';
 import 'package:anymex/controllers/settings/settings.dart';
 import 'package:anymex/controllers/track/track_binding_controller.dart';
 import 'package:anymex/database/isar_models/offline_media.dart';
@@ -15,6 +16,8 @@ import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
 import 'package:anymex/widgets/common/anymex_scaffold.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_dialog.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_image.dart';
+import 'package:anymex/widgets/anymex_widgets/anymex_progress.dart';
+import 'package:anymex/widgets/non_widgets/snackbar.dart';
 import 'package:anymex/widgets/helper/tv_wrapper.dart';
 import 'package:anymex_extension_runtime_bridge/anymex_extension_runtime_bridge.dart';
 import 'package:flutter/material.dart';
@@ -35,8 +38,13 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
   final downloadController = Get.find<DownloadController>();
 
   DownloadedMediaSummary get _currentSummary =>
-      downloadController.downloadedMedia
-          .firstWhereOrNull((s) => s.folderName == widget.summary.folderName) ??
+      downloadController.downloadedMedia.firstWhereOrNull((s) =>
+          s.folderName == widget.summary.folderName &&
+          s.extensionName == widget.summary.extensionName &&
+          s.mediaType == widget.summary.mediaType) ??
+      downloadController.downloadedMedia.firstWhereOrNull((s) =>
+          s.folderName == widget.summary.folderName &&
+          s.mediaType == widget.summary.mediaType) ??
       widget.summary;
 
   bool get _isManga => _currentSummary.mediaType == 'Manga';
@@ -75,6 +83,37 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
     return '${diff.inDays ~/ 7}w ago';
   }
 
+  void _showLoadingDialog(BuildContext context, String message) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: Dialog(
+          backgroundColor: Theme.of(ctx).colorScheme.surfaceContainer,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const AnymeXProgressIndicator(),
+                const SizedBox(width: 20),
+                Expanded(
+                  child: AnymeXText(
+                    message,
+                    size: 15,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   void _showDeleteEpisodeDialog(
       BuildContext context, DownloadedEpisodeMeta ep) {
     AnymeXDialog(
@@ -82,13 +121,22 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
       message:
           'Episode ${ep.number} will be permanently removed from your downloads.',
       onConfirm: () async {
-        await downloadController.deleteEpisode(
-          widget.summary.extensionName,
-          widget.summary.title,
-          ep.number,
-          ep.sortMap,
-        );
-        await _refresh();
+        _showLoadingDialog(context, 'Deleting episode...');
+        try {
+          await downloadController.deleteEpisode(
+            _currentSummary.extensionName,
+            _currentSummary.folderName,
+            ep.number,
+            ep.sortMap,
+          );
+          await _refresh();
+        } catch (e) {
+          snackBar('Failed to delete episode');
+        } finally {
+          if (context.mounted) {
+            Navigator.of(context, rootNavigator: true).pop();
+          }
+        }
       },
     ).show(context);
   }
@@ -100,12 +148,21 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
       title: 'Delete chapter?',
       message: '$display will be permanently removed from your downloads.',
       onConfirm: () async {
-        await downloadController.deleteChapter(
-          widget.summary.extensionName,
-          widget.summary.title,
-          ch.chapter.number,
-        );
-        await _refresh();
+        _showLoadingDialog(context, 'Deleting chapter...');
+        try {
+          await downloadController.deleteChapter(
+            _currentSummary.extensionName,
+            _currentSummary.folderName,
+            ch.chapter.number,
+          );
+          await _refresh();
+        } catch (e) {
+          snackBar('Failed to delete chapter');
+        } finally {
+          if (context.mounted) {
+            Navigator.of(context, rootNavigator: true).pop();
+          }
+        }
       },
     ).show(context);
   }
@@ -119,10 +176,22 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
       message:
           '"${widget.summary.title}" — $count ${_isManga ? 'chapters' : 'episodes'} will be permanently removed.',
       onConfirm: () async {
-        await downloadController.deleteMedia(
-            widget.summary.extensionName, widget.summary.title,
-            mediaType: widget.summary.mediaType);
-        if (mounted) Navigator.of(this.context).pop();
+        _showLoadingDialog(
+            context, 'Deleting ${_isManga ? "manga" : "anime"}...');
+        try {
+          await downloadController.deleteMedia(
+              _currentSummary.extensionName, _currentSummary.folderName,
+              mediaType: _currentSummary.mediaType);
+          if (context.mounted) {
+            Navigator.of(context, rootNavigator: true).pop();
+            Navigator.of(this.context).pop();
+          }
+        } catch (e) {
+          if (context.mounted) {
+            Navigator.of(context, rootNavigator: true).pop();
+            snackBar('Failed to delete media');
+          }
+        }
       },
     ).show(context);
   }
@@ -170,12 +239,63 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
   Widget? _buildContinueFab() {
     if (_isManga) {
       if (_mangaMeta == null || _mangaMeta!.chapters.isEmpty) return null;
-      final firstChapter = _mangaMeta!.chapters.first;
+      final chapters = _mangaMeta!.chapters;
+      final offlineStorage = Get.find<OfflineStorageController>();
+      final offlineManga =
+          offlineStorage.getMangaById(widget.summary.folderName);
+      final currentCh = offlineManga?.currentChapter;
+
+      DownloadedChapterMeta? target;
+      if (currentCh != null) {
+        final matchIdx = chapters.indexWhere((c) =>
+            (c.chapter.number != null &&
+                c.chapter.number == currentCh.number) ||
+            (c.chapter.link != null &&
+                c.chapter.link!.isNotEmpty &&
+                c.chapter.link == currentCh.link));
+        if (matchIdx != -1) {
+          final matched = chapters[matchIdx];
+          final page = currentCh.pageNumber ?? matched.chapter.pageNumber ?? 0;
+          final total = currentCh.totalPages ?? matched.chapter.totalPages ?? 0;
+          final isComplete = total > 0 && page >= total;
+          if (isComplete && matchIdx + 1 < chapters.length) {
+            target = chapters[matchIdx + 1];
+          } else {
+            target = matched;
+          }
+        }
+      }
+
+      if (target == null) {
+        final readChapters = chapters.where((c) {
+          final lastRead = c.chapter.lastReadTime ?? 0;
+          final page = c.chapter.pageNumber ?? 0;
+          return lastRead > 0 || page > 0;
+        }).toList();
+
+        if (readChapters.isNotEmpty) {
+          readChapters.sort((a, b) => (b.chapter.lastReadTime ?? 0)
+              .compareTo(a.chapter.lastReadTime ?? 0));
+          final latestRead = readChapters.first;
+          final latestIdx = chapters.indexOf(latestRead);
+          final page = latestRead.chapter.pageNumber ?? 0;
+          final total = latestRead.chapter.totalPages ?? 0;
+          final isComplete = total > 0 && page >= total;
+          if (isComplete && latestIdx + 1 < chapters.length) {
+            target = chapters[latestIdx + 1];
+          } else {
+            target = latestRead;
+          }
+        }
+      }
+
+      target ??= chapters.first;
+
       return continueFab(
         label: 'Continue Reading',
-        subtitle: firstChapter.displayTitle,
+        subtitle: target.displayTitle,
         icon: HugeIcons.strokeRoundedBookOpen01,
-        onTap: () => _playChapter(firstChapter),
+        onTap: () => _playChapter(target!),
       );
     }
 
@@ -266,6 +386,18 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
           currentChapter: currentChapter,
           shouldTrack: false,
         ));
+    final offlineStorage = Get.find<OfflineStorageController>();
+    final updatedManga = offlineStorage.getMangaById(widget.summary.folderName);
+    final cur = updatedManga?.currentChapter;
+    if (cur != null && cur.number != null) {
+      await downloadController.updateChapterProgress(
+        _currentSummary.extensionName,
+        _currentSummary.folderName,
+        cur.number.toString(),
+        cur.pageNumber ?? 0,
+        cur.totalPages ?? 0,
+      );
+    }
     await Future.delayed(const Duration(milliseconds: 300));
     await _refresh();
     await _syncBoundTrackersAfterPlay();
@@ -278,8 +410,7 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
       if (!trackCtrl.hasAnyBinding(mediaId)) return;
 
       int progress = 0;
-      final threshold =
-          settingsController.markAsCompleted; // user-configured % (default 90)
+      final threshold = settingsController.markAsCompleted;
       if (!_isManga && _meta != null) {
         for (final e in _meta!.episodes) {
           final n = int.tryParse(e.number) ?? 0;
@@ -290,15 +421,21 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
           if (watched && n > progress) progress = n;
         }
       } else if (_isManga && _mangaMeta != null) {
+        final offlineStorage = Get.find<OfflineStorageController>();
+        final readChs =
+            offlineStorage.getMangaById(mediaId)?.readChapters ?? [];
         for (final c in _mangaMeta!.chapters) {
           final num = c.chapter.number;
           if (num == null) continue;
-          final isRead = (c.chapter.lastReadTime ?? 0) > 0 ||
+          final isReadLocally = (c.chapter.lastReadTime ?? 0) > 0 ||
               (c.chapter.totalPages != null &&
                   c.chapter.pageNumber != null &&
                   c.chapter.totalPages! > 0 &&
                   c.chapter.pageNumber! >= c.chapter.totalPages!);
-          if (isRead && num.toInt() > progress) progress = num.toInt();
+          final isReadInDb = readChs.any((r) => r.number == num);
+          if ((isReadLocally || isReadInDb) && num.toInt() > progress) {
+            progress = num.toInt();
+          }
         }
       }
 
@@ -665,7 +802,6 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
     );
   }
 
-
   Widget _buildInfoBadge(ColorScheme theme, String text, Color color) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
@@ -867,7 +1003,8 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
                                             right: Radius.circular(5),
                                           ),
                                         ),
-                                        child: AnymeXText.semiBold(relativeTime.toUpperCase(),
+                                        child: AnymeXText.semiBold(
+                                          relativeTime.toUpperCase(),
                                           size: 9.0,
                                           color: theme.secondary
                                                       .computeLuminance() >
@@ -889,7 +1026,8 @@ class _DownloadedMediaViewState extends State<DownloadedMediaView> {
                                               right: Radius.circular(8),
                                             ),
                                           ),
-                                          child: AnymeXText.semiBold((episode.quality ?? 'VIDEO')
+                                          child: AnymeXText.semiBold(
+                                            (episode.quality ?? 'VIDEO')
                                                 .toUpperCase(),
                                             maxLines: 1,
                                             size: 9.0,

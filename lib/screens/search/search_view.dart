@@ -31,6 +31,7 @@ import 'package:flutter_staggered_animations/flutter_staggered_animations.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_image.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_search_bar.dart';
+import 'package:anymex/controllers/settings/settings.dart';
 import 'package:get/get.dart';
 import 'package:iconsax/iconsax.dart';
 
@@ -106,10 +107,17 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
   final Map<String, List<ExtensionSearchItem>> _allSourcesCache = {};
   final Map<String, List<Media>> _singleSourceCache = {};
 
-  ItemType get effectiveType =>
-      widget.type ?? (widget.isManga ? ItemType.manga : ItemType.anime);
+  ItemType get effectiveType {
+    if (_serviceHandler.serviceType.value == ServicesType.simkl) {
+      return ItemType.anime;
+    }
+    return widget.type ?? (widget.isManga ? ItemType.manga : ItemType.anime);
+  }
 
-  bool get isManga => effectiveType == ItemType.manga;
+  bool get isManga =>
+      _serviceHandler.serviceType.value == ServicesType.simkl
+          ? false
+          : effectiveType == ItemType.manga;
 
   bool get isExtensionMode =>
       _serviceHandler.serviceType.value == ServicesType.extensions ||
@@ -178,6 +186,9 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
   }
 
   void _saveHistory() {
+    if (Get.isRegistered<Settings>() && Get.find<Settings>().isIncognito.value) {
+      return;
+    }
     DynamicKeys.searchHistory.set(
       '${effectiveType.name}_${serviceHandler.serviceType.value.name}',
       _searchedTerms.toList(),

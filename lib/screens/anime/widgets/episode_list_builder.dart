@@ -29,6 +29,7 @@ import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_tile.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_tile_builder.dart';
 import 'package:anymex/widgets/common/anymex_pills.dart';
+import 'package:anymex/widgets/animation/widget_animations.dart';
 import 'package:anymex/widgets/helper/platform_builder.dart';
 import 'package:anymex/widgets/helper/tv_wrapper.dart';
 import 'package:anymex/database/isar_models/offline_media.dart';
@@ -83,7 +84,10 @@ class EpisodeListBuilder extends StatefulWidget {
   State<EpisodeListBuilder> createState() => _EpisodeListBuilderState();
 }
 
-class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
+class _EpisodeListBuilderState extends State<EpisodeListBuilder>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
   final selectedChunkIndex = 1.obs;
   final RxMap<String, String> selectedSortValues = <String, String>{}.obs;
   final selectedViewTab = 0.obs;
@@ -105,23 +109,28 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
   Worker? _currentMediaWorker;
   VoidCallback? _offlineStorageListener;
   bool _isUpdatingChunk = false;
+  List<EpisodeSortSection> _cachedSortSections = const [];
+  List<Episode> _cachedEpisodesToShow = const [];
+  List<List<Episode>> _cachedChunkedEpisodes = const [];
 
   @override
   void initState() {
     super.initState();
+    print("Episode pinged");
     downloadController = Get.isRegistered<DownloadController>()
         ? Get.find<DownloadController>()
         : Get.put(DownloadController());
     final mediaTitle = widget.anilistData?.title ??
-        (widget.episodeList.isNotEmpty ? widget.episodeList.first.title ?? '' : '');
+        (widget.episodeList.isNotEmpty
+            ? widget.episodeList.first.title ?? ''
+            : '');
     final extName = sourceController.activeSource.value?.name ?? '';
     if (extName.isNotEmpty && mediaTitle.isNotEmpty) {
       downloadController.ensureMediaMetaLoaded(extName, mediaTitle);
     }
-    _initSortGrouping();
     _initUserProgress();
     _initEpisodes();
-    _updateChunkIndex();
+    _recomputeAllEpisodeData();
 
     _authLoginWorker = ever(auth.isLoggedIn, (_) => _initUserProgress());
     _userProgressWorker = ever(userProgress, (_) => _initEpisodes());
@@ -138,7 +147,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
         offlineWatchedEpisodes = savedData.watchedEpisodes ?? [];
         _initUserProgress();
         _initEpisodes();
-        _updateChunkIndex();
+        _recomputeAllEpisodeData();
         if (mounted) setState(() {});
       }
     };
@@ -160,9 +169,8 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
     final newLast = newLen > 0 ? widget.episodeList.last.number : null;
 
     if (oldLen != newLen || oldFirst != newFirst || oldLast != newLast) {
-      _initSortGrouping();
       _initEpisodes();
-      _updateChunkIndex();
+      _recomputeAllEpisodeData();
     }
   }
 
@@ -177,14 +185,26 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
     super.dispose();
   }
 
+  void _recomputeAllEpisodeData({bool preserveChunk = true}) {
+    _cachedSortSections = buildEpisodeSortSections(widget.episodeList);
+    _initSortGrouping();
+    _cachedEpisodesToShow = _episodesForSelectedSortKey();
+    _cachedChunkedEpisodes = chunkEpisodes(
+      _cachedEpisodesToShow,
+      calculateChunkSize(_cachedEpisodesToShow),
+    );
+    if (!preserveChunk && selectedChunkIndex.value != 1) {
+      selectedChunkIndex.value = 1;
+    }
+    _updateChunkIndex();
+  }
+
   void _updateChunkIndex() {
     try {
       if (!mounted || _isUpdatingChunk) return;
       _isUpdatingChunk = true;
       try {
-        final episodesToChunk = _episodesForSelectedSortKey();
-        final chunkedEpisodes =
-            chunkEpisodes(episodesToChunk, calculateChunkSize(episodesToChunk));
+        final chunkedEpisodes = _cachedChunkedEpisodes;
 
         if (chunkedEpisodes.length > 1) {
           final progress =
@@ -304,8 +324,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
       return true;
     }
 
-    final hasSortSections =
-        buildEpisodeSortSections(widget.episodeList).isNotEmpty;
+    final hasSortSections = _cachedSortSections.isNotEmpty;
     if (!hasSortSections) {
       final epNum = episode.number.toInt();
       if (epNum > 0 && epNum <= userProgress.value) return true;
@@ -321,9 +340,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
         );
 
     final target = savedEP ??
-        (savedEpisode.value.isSameEpisode(episode)
-            ? savedEpisode.value
-            : null);
+        (savedEpisode.value.isSameEpisode(episode) ? savedEpisode.value : null);
     if (target?.timeStampInMilliseconds != null &&
         target?.durationInMilliseconds != null &&
         target!.durationInMilliseconds! > 0) {
@@ -334,10 +351,11 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
   }
 
   void _initSortGrouping() {
-    final savedData =
-        offlineStorage.getAnimeById(widget.anilistData?.id ?? '');
+    final savedData = offlineStorage.getAnimeById(widget.anilistData?.id ?? '');
     final savedSortMap = savedData?.currentEpisode?.sortMap ?? {};
-    final sections = buildEpisodeSortSections(widget.episodeList);
+    final sections = _cachedSortSections.isNotEmpty
+        ? _cachedSortSections
+        : buildEpisodeSortSections(widget.episodeList);
     final nextSelection = <String, String>{};
 
     for (final section in sections) {
@@ -403,9 +421,11 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
 
     if (values.isNotEmpty) return values;
 
-    final fallbackSection =
-        (sections ?? buildEpisodeSortSections(widget.episodeList))
-            .firstWhereOrNull((section) => section.key == key);
+    final fallbackSection = (sections ??
+            (_cachedSortSections.isNotEmpty
+                ? _cachedSortSections
+                : buildEpisodeSortSections(widget.episodeList)))
+        .firstWhereOrNull((section) => section.key == key);
     return fallbackSection?.values ?? const [];
   }
 
@@ -445,6 +465,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     if (widget.episodeList.isEmpty) {
       if (widget.isSliverMode) {
         return const SliverToBoxAdapter(
@@ -460,21 +481,22 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
       );
     }
 
-    final sortSections = buildEpisodeSortSections(widget.episodeList);
-
     return Obx(() {
-      _initSortGrouping();
+      if (_cachedChunkedEpisodes.isEmpty && widget.episodeList.isNotEmpty) {
+        _recomputeAllEpisodeData();
+      }
+      final sortSections = _cachedSortSections;
       final currentStyle = EpisodeStyleRegistry.activeStyle;
       final mediaTitle = widget.anilistData?.title ??
-          (widget.episodeList.isNotEmpty ? widget.episodeList.first.title ?? '' : '');
+          (widget.episodeList.isNotEmpty
+              ? widget.episodeList.first.title ?? ''
+              : '');
       final extName = sourceController.activeSource.value?.name ?? '';
       final downloadedEpisodes =
           downloadController.getDownloadedEpisodes(extName, mediaTitle);
       final isDownloadedTab = selectedViewTab.value == 1;
 
-      final episodesToShow = _episodesForSelectedSortKey();
-      final chunkedEpisodes =
-          chunkEpisodes(episodesToShow, calculateChunkSize(episodesToShow));
+      final chunkedEpisodes = _cachedChunkedEpisodes;
       final safeChunkIndex = chunkedEpisodes.isEmpty
           ? 0
           : selectedChunkIndex.value.clamp(0, chunkedEpisodes.length - 1);
@@ -525,27 +547,29 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
                     final isWatched = _isEpisodeWatched(episode);
                     final prog = _calculateEpisodeProgress(episode);
 
-                    return currentStyle.builder(
-                      context,
-                      episode,
-                      isSelected,
-                      isWatched,
-                      prog,
-                      widget.anilistData,
-                      () => _playDownloadedEpisode(
-                          item, downloadedEpisodes, extName, mediaTitle),
-                      () => _playDownloadedEpisode(
-                          item, downloadedEpisodes, extName, mediaTitle),
-                      downloadButton: IconButton(
-                        icon: Icon(
-                          Icons.delete_outline_rounded,
-                          color: context.colors.error,
-                          size: 20,
-                        ),
-                        onPressed: () => _confirmDeleteEpisode(
-                            context, item, extName, mediaTitle),
-                      ),
-                    );
+                    return currentStyle
+                        .builder(
+                          context,
+                          episode,
+                          isSelected,
+                          isWatched,
+                          prog,
+                          widget.anilistData,
+                          () => _playDownloadedEpisode(
+                              item, downloadedEpisodes, extName, mediaTitle),
+                          () => _playDownloadedEpisode(
+                              item, downloadedEpisodes, extName, mediaTitle),
+                          downloadButton: IconButton(
+                            icon: Icon(
+                              Icons.delete_outline_rounded,
+                              color: context.colors.error,
+                              size: 20,
+                            ),
+                            onPressed: () => _confirmDeleteEpisode(
+                                context, item, extName, mediaTitle),
+                          ),
+                        )
+                        .animatePop(index: index, slideX: 0.0, slideY: 1.0);
                   },
                 )
               else
@@ -582,7 +606,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
                               context, item, extName, mediaTitle),
                         ),
                       ),
-                    );
+                    ).animatePop(index: index);
                   },
                 )
             else if (currentStyle.isGrid)
@@ -626,7 +650,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
                       extName,
                       mediaTitle,
                     ),
-                  );
+                  ).animatePop(index: index);
                 },
               )
             else
@@ -660,7 +684,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
                         mediaTitle,
                       ),
                     ),
-                  );
+                  ).animatePop(index: index);
                 },
               ),
           ],
@@ -719,7 +743,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
                             context, item, extName, mediaTitle),
                       ),
                     ),
-                  );
+                  ).animatePop(index: index);
                 },
               )
           else
@@ -756,7 +780,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
                       mediaTitle,
                     ),
                   ),
-                );
+                ).animatePop(index: index);
               },
             ),
         ],
@@ -816,8 +840,8 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
                       _showBatchDownloadSheet(context, extName, mediaTitle),
                   borderRadius: BorderRadius.circular(14),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                     decoration: BoxDecoration(
                       color: context.colors.surfaceContainerHighest
                           .opaque(0.35, iReallyMeanIt: true),
@@ -879,8 +903,8 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
           ),
           if (!isDownloadedTab) ...[
             ...sortSections.map((section) {
-              final values = _availableValuesForKey(section.key,
-                  sections: sortSections);
+              final values =
+                  _availableValuesForKey(section.key, sections: sortSections);
               if (values.length <= 1) return const SizedBox.shrink();
 
               return Padding(
@@ -896,8 +920,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
                       return;
                     }
                     selectedSortValues[section.key] = sortValue;
-                    _initSortGrouping();
-                    selectedChunkIndex.value = 1;
+                    _recomputeAllEpisodeData(preserveChunk: false);
                   },
                 ),
               );
@@ -1183,15 +1206,17 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
     String extName,
     String mediaTitle,
   ) async {
-    final meta = await downloadController.ensureMediaMetaLoaded(extName, mediaTitle) ??
-        await downloadController.getMediaMeta(extName, mediaTitle) ??
-        DownloadedMediaMeta(
-          episodes: downloadedEpisodes,
-          media: widget.anilistData?.toOfflineMedia(),
-        );
+    final meta =
+        await downloadController.ensureMediaMetaLoaded(extName, mediaTitle) ??
+            await downloadController.getMediaMeta(extName, mediaTitle) ??
+            DownloadedMediaMeta(
+              episodes: downloadedEpisodes,
+              media: widget.anilistData?.toOfflineMedia(),
+            );
     final summary = downloadController.downloadedMedia.firstWhereOrNull(
           (s) =>
-              s.extensionName.toLowerCase() == extName.toLowerCase() &&
+              (s.extensionName.toLowerCase() == extName.toLowerCase() ||
+                  s.extensionName.toLowerCase() == 'anymex') &&
               (s.folderName.toLowerCase() == mediaTitle.toLowerCase() ||
                   s.title.toLowerCase() == mediaTitle.toLowerCase()),
         ) ??
@@ -1202,7 +1227,7 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
           poster: (widget.anilistData?.poster.isNotEmpty == true)
               ? widget.anilistData!.poster
               : widget.anilistData?.cover,
-          extensionName: extName,
+          extensionName: 'AnymeX',
           folderName: mediaTitle,
           mediaType: 'Anime',
         );
@@ -1260,9 +1285,12 @@ class _EpisodeListBuilderState extends State<EpisodeListBuilder> {
       snackBar('No active source selected');
       return;
     }
-    final episodesToShow = _episodesForSelectedSortKey();
-    final chunkedEpisodes =
-        chunkEpisodes(episodesToShow, calculateChunkSize(episodesToShow));
+    final episodesToShow = _cachedEpisodesToShow.isNotEmpty
+        ? _cachedEpisodesToShow
+        : _episodesForSelectedSortKey();
+    final chunkedEpisodes = _cachedChunkedEpisodes.isNotEmpty
+        ? _cachedChunkedEpisodes
+        : chunkEpisodes(episodesToShow, calculateChunkSize(episodesToShow));
     final safeChunkIndex = chunkedEpisodes.isEmpty
         ? 0
         : selectedChunkIndex.value.clamp(0, chunkedEpisodes.length - 1);

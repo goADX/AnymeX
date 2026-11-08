@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart' show VoidCallback;
+import 'package:anymex/controllers/discord/discord_rpc.dart';
 import 'package:anymex/controllers/settings/settings.dart';
 import 'package:anymex/controllers/cacher/cache_controller.dart';
 import 'package:anymex/controllers/offline/offline_storage_controller.dart';
@@ -18,7 +19,9 @@ import 'package:anymex/database/isar_models/episode.dart';
 import 'package:anymex/database/isar_models/offline_media.dart';
 import 'package:anymex/models/Anilist/anilist_media_user.dart';
 import 'package:anymex/models/Media/media.dart';
+import 'package:anymex/models/animethemes/anime_theme.dart';
 import 'package:anymex/screens/anime/widgets/comments/controller/comment_preloader.dart';
+import 'package:anymex/utils/anime_themes_api.dart';
 import 'package:anymex/utils/function.dart';
 import 'package:anymex/utils/logger.dart';
 import 'package:anymex/widgets/non_widgets/snackbar.dart';
@@ -82,9 +85,35 @@ class MediaDetailsController extends GetxController {
   final RxBool isLoading = true.obs;
   final RxBool isSyncing = false.obs;
   final RxBool episodeError = false.obs;
+  final RxString errorMessage = ''.obs;
+  final RxString errorType = ''.obs;
   final RxString searchedTitle = ''.obs;
   final RxBool isAnilistLoading = false.obs;
   final RxBool isSecondaryLoading = false.obs;
+  final RxList<AnimeTheme> animeThemes = <AnimeTheme>[].obs;
+  final RxBool isThemesLoading = false.obs;
+
+  Future<void> fetchAnimeThemes() async {
+    if (!isAnime) return;
+    final id = initialMedia.id.toString();
+    if (id.isEmpty) return;
+    isThemesLoading.value = true;
+    try {
+      final list = await AnimeThemesAPI.searchAnimeThemes(id);
+      if (!isClosed) {
+        animeThemes.assignAll(list);
+      }
+    } catch (_) {
+    } finally {
+      if (!isClosed) {
+        isThemesLoading.value = false;
+      }
+    }
+  }
+
+  void retryFetch() {
+    _fetchContentFromSource();
+  }
 
   final Rxn<d.Source> activeSource = Rxn<d.Source>();
   late RxInt selectedPage;
@@ -151,8 +180,12 @@ class MediaDetailsController extends GetxController {
     anilist = Get.find<AnilistAuth>();
 
     selectedPage = initialTabIndex.obs;
-    final cached = Get.find<CacheController>().getCacheById(initialMedia.id);
+    final cached = Get.find<CacheController>()
+        .getCacheById(initialMedia.id, initialMedia.serviceType);
     media = Rx<Media>(cached ?? initialMedia);
+    if (Get.isRegistered<DiscordRPCController>()) {
+      DiscordRPCController.instance.updateMediaPresence(media: media.value);
+    }
     isAnilistLoading.value = cached == null;
     isSecondaryLoading.value = cached == null;
 
@@ -181,9 +214,16 @@ class MediaDetailsController extends GetxController {
     };
     offlineStorage.addListener(_offlineStorageListener!);
 
-    _fetchContentFromSource();
-    _fetchFullDetails().then((_) {
-      _fetchSecondaryAnilistData();
+    Future.microtask(() {
+      if (!isClosed) {
+        _fetchContentFromSource();
+        fetchAnimeThemes();
+        _fetchFullDetails().then((_) {
+          if (!isClosed) {
+            _fetchSecondaryAnilistData();
+          }
+        });
+      }
     });
   }
 
@@ -207,6 +247,9 @@ class MediaDetailsController extends GetxController {
     sourceController.cancelInProgress('manga_detail');
     if (_offlineStorageListener != null) {
       offlineStorage.removeListener(_offlineStorageListener!);
+    }
+    if (Get.isRegistered<DiscordRPCController>()) {
+      DiscordRPCController.instance.updateBrowsingPresence();
     }
     super.onClose();
   }
@@ -509,6 +552,8 @@ class MediaDetailsController extends GetxController {
   Future<void> _fetchContentFromSource({int? requestId}) async {
     final reqId = requestId ?? _beginSourceRequest();
     episodeError.value = false;
+    errorMessage.value = '';
+    errorType.value = '';
     isLoading.value = true;
     episodeList.clear();
     rawEpisodes.clear();
@@ -518,6 +563,10 @@ class MediaDetailsController extends GetxController {
     final source = activeSource.value;
     if (source == null) {
       isLoading.value = false;
+      episodeError.value = true;
+      errorType.value = 'no_source';
+      errorMessage.value =
+          "No source selected. Please install or select a source extension.";
       searchedTitle.value = "No Source Selected";
       _isInitialFetchDone = true;
       return;
@@ -534,6 +583,7 @@ class MediaDetailsController extends GetxController {
                 initialSource?.id == source.id ||
                 (media.value.sourceId == null && initialSource != null));
 
+    String? capturedSearchError;
     final Media? mappedData;
     if (isDirectSourceMedia) {
       searchedTitle.value =
@@ -553,6 +603,9 @@ class MediaDetailsController extends GetxController {
         type: media.value.mediaType,
         savedTitle: savedTitle,
         synonyms: media.value.synonyms,
+        onSearchError: (err) {
+          capturedSearchError = err;
+        },
       );
     }
 
@@ -583,6 +636,12 @@ class MediaDetailsController extends GetxController {
           rawEpisodes.assignAll(converted);
           episodeList.assignAll(_renewEpisodeData(converted));
           searchedTitle.value = "Found: $foundTitle";
+          if (episodeList.isEmpty) {
+            episodeError.value = true;
+            errorType.value = 'empty';
+            errorMessage.value = "No episodes found in ${source.name}";
+            searchedTitle.value = "No Episodes Found";
+          }
           isLoading.value = false;
           _isInitialFetchDone = true;
 
@@ -601,6 +660,11 @@ class MediaDetailsController extends GetxController {
             media.value.totalChapters = chapterList.length.toString();
             media.value.altMediaContent = chapterList.toList();
             refreshProgress();
+          } else {
+            episodeError.value = true;
+            errorType.value = 'empty';
+            errorMessage.value = "No chapters found in ${source.name}";
+            searchedTitle.value = "No Chapters Found";
           }
           isLoading.value = false;
           _isInitialFetchDone = true;
@@ -631,21 +695,35 @@ class MediaDetailsController extends GetxController {
         if (_isStaleSourceRequest(reqId)) return;
         Logger.e('Failed to fetch details from mapped media: $e');
         episodeError.value = true;
+        errorType.value = 'detail';
+        errorMessage.value = e.toString();
+        searchedTitle.value = "Details Error";
         isLoading.value = false;
         _isInitialFetchDone = true;
       }
     } else {
       if (_isStaleSourceRequest(reqId)) return;
       episodeError.value = true;
-      searchedTitle.value = "No Match Found";
       isLoading.value = false;
       _isInitialFetchDone = true;
+      if (capturedSearchError != null && capturedSearchError!.isNotEmpty) {
+        errorType.value = 'search';
+        errorMessage.value = capturedSearchError!;
+        searchedTitle.value = "Search Error";
+      } else {
+        errorType.value = 'no_match';
+        errorMessage.value =
+            "No match found for '${media.value.title}' in ${source.name}";
+        searchedTitle.value = "No Match Found";
+      }
     }
   }
 
   Future<void> fetchSourceDetailsFromMedia(Media mappedMedia) async {
     final reqId = _beginSourceRequest();
     episodeError.value = false;
+    errorMessage.value = '';
+    errorType.value = '';
     isLoading.value = true;
     searchedTitle.value = "Searching: ${mappedMedia.title}...";
 
@@ -653,6 +731,9 @@ class MediaDetailsController extends GetxController {
       final source = activeSource.value;
       if (source == null) {
         isLoading.value = false;
+        episodeError.value = true;
+        errorType.value = 'no_source';
+        errorMessage.value = "No source selected.";
         searchedTitle.value = "No Source Selected";
         return;
       }
@@ -677,6 +758,12 @@ class MediaDetailsController extends GetxController {
         rawEpisodes.assignAll(converted);
         episodeList.assignAll(_renewEpisodeData(converted));
         searchedTitle.value = "Found: ${mappedMedia.title}";
+        if (episodeList.isEmpty) {
+          episodeError.value = true;
+          errorType.value = 'empty';
+          errorMessage.value = "No episodes found in ${source.name}";
+          searchedTitle.value = "No Episodes Found";
+        }
         isLoading.value = false;
 
         _fetchFillerInfo();
@@ -691,6 +778,11 @@ class MediaDetailsController extends GetxController {
           media.value.totalChapters = chapterList.length.toString();
           media.value.altMediaContent = chapterList.toList();
           refreshProgress();
+        } else {
+          episodeError.value = true;
+          errorType.value = 'empty';
+          errorMessage.value = "No chapters found in ${source.name}";
+          searchedTitle.value = "No Chapters Found";
         }
         isLoading.value = false;
       }
@@ -702,7 +794,9 @@ class MediaDetailsController extends GetxController {
       if (_isStaleSourceRequest(reqId)) return;
       Logger.e('Failed to fetch source details from mapped media: $e');
       episodeError.value = true;
-      searchedTitle.value = "No Match Found";
+      errorType.value = 'detail';
+      errorMessage.value = e.toString();
+      searchedTitle.value = "Details Error";
       isLoading.value = false;
     }
   }

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
 import 'package:anymex/database/data_keys/keys.dart';
+import 'package:anymex/models/custom_card_style.dart';
 import 'package:anymex/models/player/player_adaptor.dart';
 import 'package:anymex/models/ui/ui_adaptor.dart';
 import 'package:anymex/screens/anime/watch/controller/player_controller.dart';
@@ -36,8 +37,26 @@ class Settings extends GetxController {
   final mediaIndicatorThemeRx = 'default'.obs;
   final readerControlThemeRx = 'default'.obs;
   final chapterStyleRx = 'compact'.obs;
+  late final Rx<CardCustomization> customCardStyleRx;
+
+  CardCustomization get customCardStyle => customCardStyleRx.value;
+  CardCustomization get cardCustomization => customCardStyleRx.value;
+
+  set customCardStyle(CardCustomization style) {
+    customCardStyleRx.value = style;
+    UISettingsKeys.customCardStyleJson.set(jsonEncode(style.toJson()));
+  }
+
+  set cardCustomization(CardCustomization style) {
+    customCardStyle = style;
+  }
+
+  void updateCustomCardStyle(CardCustomization Function(CardCustomization) update) {
+    customCardStyle = update(customCardStyleRx.value);
+  }
 
   RxBool useAlternateTitle = false.obs;
+  RxBool isIncognito = false.obs;
   RxBool enableBetaUpdates = false.obs;
   RxBool writeLogToFile = false.obs;
   RxBool showHomeContinueWatching = true.obs;
@@ -99,7 +118,19 @@ class Settings extends GetxController {
         ReaderKeys.readerControlTheme.get<String>('default');
     chapterStyleRx.value = ReaderKeys.chapterStyle.get<String>('compact');
 
+    final savedCardStyleJson =
+        UISettingsKeys.customCardStyleJson.get<String>('');
+    CardCustomization initialCustomStyle = const CardCustomization();
+    if (savedCardStyleJson.isNotEmpty) {
+      try {
+        initialCustomStyle =
+            CardCustomization.fromJson(jsonDecode(savedCardStyleJson));
+      } catch (_) {}
+    }
+    customCardStyleRx = Rx<CardCustomization>(initialCustomStyle);
+
     useAlternateTitle.value = General.useAlternateTitle.get<bool>(false);
+    isIncognito.value = General.incognitoMode.get<bool>(false);
     enableBetaUpdates.value = General.enableBetaUpdates.get<bool>(false);
     writeLogToFile.value = General.writeLogToFile.get<bool>(false);
     showHomeContinueWatching.value =
@@ -131,6 +162,12 @@ class Settings extends GetxController {
     }
   }
 
+  void toggleIncognito([bool? value]) {
+    final next = value ?? !isIncognito.value;
+    isIncognito.value = next;
+    General.incognitoMode.set(next);
+  }
+
   Future<void> _initDisplayModes() async {
     try {
       final modes = await FlutterDisplayMode.supported;
@@ -144,7 +181,21 @@ class Settings extends GetxController {
         );
         await applyDisplayRefreshMode();
       } else {
-        preferredDisplayMode.value = DisplayMode.auto;
+        final validModes = modes
+            .where((m) =>
+                m != DisplayMode.auto &&
+                m.id != 0 &&
+                m.width != 0 &&
+                m.height != 0)
+            .toList();
+
+        if (Platform.isAndroid && validModes.isNotEmpty) {
+          validModes.sort((a, b) => b.refreshRate.compareTo(a.refreshRate));
+          preferredDisplayMode.value = validModes.first;
+          await FlutterDisplayMode.setHighRefreshRate();
+        } else {
+          preferredDisplayMode.value = DisplayMode.auto;
+        }
       }
 
       activeDisplayMode.value = await FlutterDisplayMode.active;
@@ -160,6 +211,8 @@ class Settings extends GetxController {
       if (savedStr != null) {
         final mode = preferredDisplayMode.value ?? DisplayMode.auto;
         await FlutterDisplayMode.setPreferredMode(mode);
+      } else {
+        await FlutterDisplayMode.setHighRefreshRate();
       }
       await Future.delayed(const Duration(milliseconds: 100));
       activeDisplayMode.value = await FlutterDisplayMode.active;
@@ -427,6 +480,58 @@ class Settings extends GetxController {
   set useLegacyNavbar(bool value) {
     uiSettings.update((s) => s?.useLegacyNavbar = value);
     UISettingsKeys.useLegacyNavbar.set(value);
+    uiSettings.refresh();
+    update();
+  }
+
+  bool get useComputedBlur => _getUISetting((s) => s.useComputedBlur);
+  set useComputedBlur(bool value) {
+    uiSettings.update((s) => s?.useComputedBlur = value);
+    UISettingsKeys.useComputedBlur.set(value);
+    uiSettings.refresh();
+    update();
+  }
+
+  int get detailsBlurStyle => _getUISetting((s) => s.detailsBlurStyle);
+  set detailsBlurStyle(int value) {
+    uiSettings.update((s) => s?.detailsBlurStyle = value);
+    UISettingsKeys.detailsBlurStyle.set(value);
+    if (value == 1) {
+      useComputedBlur = true;
+    }
+    uiSettings.refresh();
+    update();
+  }
+
+  int get detailsBlurScope => _getUISetting((s) => s.detailsBlurScope);
+  set detailsBlurScope(int value) {
+    uiSettings.update((s) => s?.detailsBlurScope = value);
+    UISettingsKeys.detailsBlurScope.set(value);
+    fullScreenBlur = value == 1;
+    uiSettings.refresh();
+    update();
+  }
+
+  bool get fullScreenBlur => _getUISetting((s) => s.fullScreenBlur);
+  set fullScreenBlur(bool value) {
+    uiSettings.update((s) => s?.fullScreenBlur = value);
+    UISettingsKeys.fullScreenBlur.set(value);
+    uiSettings.refresh();
+    update();
+  }
+
+  bool get tintBlur => _getUISetting((s) => s.tintBlur);
+  set tintBlur(bool value) {
+    uiSettings.update((s) => s?.tintBlur = value);
+    UISettingsKeys.tintBlur.set(value);
+    uiSettings.refresh();
+    update();
+  }
+
+  bool get usePosterForBlur => _getUISetting((s) => s.usePosterForBlur);
+  set usePosterForBlur(bool value) {
+    uiSettings.update((s) => s?.usePosterForBlur = value);
+    UISettingsKeys.usePosterForBlur.set(value);
     uiSettings.refresh();
     update();
   }

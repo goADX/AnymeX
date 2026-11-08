@@ -1,9 +1,12 @@
 // ignore_for_file: invalid_use_of_protected_member
 
+import 'dart:io';
 import 'dart:convert';
 import 'package:anymex/utils/oauth_helper.dart';
+import 'package:anymex/widgets/anymex_widgets/anymex_bottomsheet.dart';
 import 'dart:math' as math;
 
+import 'package:anymex/controllers/cacher/cold_cache.dart';
 import 'package:anymex/controllers/service_handler/params.dart';
 import 'package:anymex/controllers/service_handler/service_handler.dart';
 import 'package:anymex/controllers/services/community_service.dart';
@@ -112,14 +115,127 @@ class SimklService extends GetxController
   }
 
   @override
-  Future<void> fetchHomePage() async => Future.wait([
-        fetchMovies(),
-        fetchSeries(),
-        fetchCountryMovies(),
-        fetchCountrySeries(),
+  void onInit() {
+    super.onInit();
+    _paintCached();
+  }
+
+  Future<void> _paintCached() async {
+    try {
+      final cached = await ColdCache.read('simkl_home');
+      if (cached != null) {
+        if (cached['trendingMovies'] is List) {
+          trendingMovies.value = (cached['trendingMovies'] as List)
+              .map((e) => Media.fromSimkl(e, true))
+              .toList();
+        }
+        if (cached['trendingSeries'] is List) {
+          trendingSeries.value = (cached['trendingSeries'] as List)
+              .map((e) => Media.fromSimkl(e, false))
+              .toList();
+        }
+        if (cached['koreanMovies'] is List) {
+          koreanMovies.value = (cached['koreanMovies'] as List)
+              .map((e) => Media.fromSimkl(e, true))
+              .toList();
+        }
+        if (cached['usMovies'] is List) {
+          usMovies.value = (cached['usMovies'] as List)
+              .map((e) => Media.fromSimkl(e, true))
+              .toList();
+        }
+        if (cached['ukMovies'] is List) {
+          ukMovies.value = (cached['ukMovies'] as List)
+              .map((e) => Media.fromSimkl(e, true))
+              .toList();
+        }
+        if (cached['canadaMovies'] is List) {
+          canadaMovies.value = (cached['canadaMovies'] as List)
+              .map((e) => Media.fromSimkl(e, true))
+              .toList();
+        }
+        if (cached['koreanSeries'] is List) {
+          koreanSeries.value = (cached['koreanSeries'] as List)
+              .map((e) => Media.fromSimkl(e, false))
+              .toList();
+        }
+        if (cached['japaneseSeries'] is List) {
+          japaneseSeries.value = (cached['japaneseSeries'] as List)
+              .map((e) => Media.fromSimkl(e, false))
+              .toList();
+        }
+        if (cached['usSeries'] is List) {
+          usSeries.value = (cached['usSeries'] as List)
+              .map((e) => Media.fromSimkl(e, false))
+              .toList();
+        }
+        if (cached['ukSeries'] is List) {
+          ukSeries.value = (cached['ukSeries'] as List)
+              .map((e) => Media.fromSimkl(e, false))
+              .toList();
+        }
+        if (cached['canadaSeries'] is List) {
+          canadaSeries.value = (cached['canadaSeries'] as List)
+              .map((e) => Media.fromSimkl(e, false))
+              .toList();
+        }
+      }
+    } catch (e) {
+      Logger.i('Error painting cached Simkl feed: $e');
+    }
+  }
+
+  @override
+  Future<void> fetchHomePage() async {
+    try {
+      final results = await Future.wait([
+        api.fetchTrendingRaw(true),
+        api.fetchTrendingRaw(false),
+        api.fetchGenresRaw('movies', 'kr'),
+        api.fetchGenresRaw('movies', 'us'),
+        api.fetchGenresRaw('movies', 'gb'),
+        api.fetchGenresRaw('movies', 'ca'),
+        api.fetchGenresRaw('tv', 'kr'),
+        api.fetchGenresRaw('tv', 'jp'),
+        api.fetchGenresRaw('tv', 'us'),
+        api.fetchGenresRaw('tv', 'gb'),
+        api.fetchGenresRaw('tv', 'ca'),
+      ]);
+
+      await Future.wait([
         communityService.fetchCommunityShows(),
         communityService.fetchCommunityMovies(),
       ]);
+
+      ColdCache.write('simkl_home', {
+        'trendingMovies': results[0],
+        'trendingSeries': results[1],
+        'koreanMovies': results[2],
+        'usMovies': results[3],
+        'ukMovies': results[4],
+        'canadaMovies': results[5],
+        'koreanSeries': results[6],
+        'japaneseSeries': results[7],
+        'usSeries': results[8],
+        'ukSeries': results[9],
+        'canadaSeries': results[10],
+      });
+
+      trendingMovies.value = (results[0]).map((e) => Media.fromSimkl(e, true)).toList();
+      trendingSeries.value = (results[1]).map((e) => Media.fromSimkl(e, false)).toList();
+      koreanMovies.value = (results[2]).map((e) => Media.fromSimkl(e, true)).toList();
+      usMovies.value = (results[3]).map((e) => Media.fromSimkl(e, true)).toList();
+      ukMovies.value = (results[4]).map((e) => Media.fromSimkl(e, true)).toList();
+      canadaMovies.value = (results[5]).map((e) => Media.fromSimkl(e, true)).toList();
+      koreanSeries.value = (results[6]).map((e) => Media.fromSimkl(e, false)).toList();
+      japaneseSeries.value = (results[7]).map((e) => Media.fromSimkl(e, false)).toList();
+      usSeries.value = (results[8]).map((e) => Media.fromSimkl(e, false)).toList();
+      ukSeries.value = (results[9]).map((e) => Media.fromSimkl(e, false)).toList();
+      canadaSeries.value = (results[10]).map((e) => Media.fromSimkl(e, false)).toList();
+    } catch (e) {
+      Logger.i('Error fetching Simkl home page data: $e');
+    }
+  }
 
   Future<List<Media>> searchMovies(String query, {int page = 1}) async {
     return api.searchMedia('movie', query, page: page);
@@ -624,11 +740,9 @@ class SimklService extends GetxController
       if (progress != null) {
         currentMedia.value.episodeCount = progress.toString();
       }
-      // snackBar('${isMovie ? "Movie" : "Series"} Tracked Successfully');
       isMovie ? fetchUserMovieList() : fetchUserSeriesList();
     } catch (e, stack) {
       Logger.i('Exception: $e\n$stack');
-      errorSnackBar('An unexpected error occurred');
     }
   }
 
@@ -813,6 +927,26 @@ class SimklService extends GetxController
 
   @override
   Future<void> login(BuildContext context) async {
+    final isDesktop =
+        Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+
+    bool forceWebAuth = false;
+    if (!isDesktop) {
+      final selectedMethod = await AnymeXSheet.custom<String>(
+        loginSheetHelper(
+          context: context,
+          title: 'Login to Simkl',
+          serviceName: 'Simkl',
+          showTokenOption: false,
+        ),
+        context,
+        showDragHandle: true,
+      );
+
+      if (selectedMethod == null || !context.mounted) return;
+      forceWebAuth = selectedMethod == 'browser_external';
+    }
+
     final clientId = dotenv.env['SIMKL_CLIENT_ID'];
 
     final url =
@@ -822,7 +956,31 @@ class SimklService extends GetxController
         context: context,
         url: url,
         callbackUrlScheme: 'anymex',
-        forceWebAuth: true,
+        forceWebAuth: forceWebAuth,
+      );
+
+      if (result != null) {
+        final code = Uri.parse(result).queryParameters['code'];
+        if (code != null) {
+          await _exchangeCodeForToken(code);
+        }
+      }
+    } catch (e) {
+      Logger.i(e.toString());
+    }
+  }
+
+  Future<void> loginWithWebView(BuildContext context) async {
+    final clientId = dotenv.env['SIMKL_CLIENT_ID'];
+
+    final url =
+        'https://simkl.com/oauth/authorize?response_type=code&client_id=$clientId&redirect_uri=anymex://callback';
+    try {
+      final result = await OauthHelper.authenticate(
+        context: context,
+        url: url,
+        callbackUrlScheme: 'anymex',
+        forceWebAuth: false,
       );
 
       if (result != null) {

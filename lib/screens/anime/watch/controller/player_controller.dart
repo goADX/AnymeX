@@ -45,10 +45,12 @@ import 'package:anymex/utils/shaders.dart';
 import 'package:anymex/utils/string_extensions.dart';
 import 'package:anymex/utils/subtitle_pre_translator.dart';
 import 'package:anymex/utils/subtitle_translator.dart';
+import 'package:anymex/controllers/services/torrent/torrent_service.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_titlebar.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_toast.dart';
 import 'package:anymex/widgets/non_widgets/snackbar.dart';
-import 'package:anymex_extension_runtime_bridge/anymex_extension_runtime_bridge.dart' as d;
+import 'package:anymex_extension_runtime_bridge/anymex_extension_runtime_bridge.dart'
+    as d;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -62,33 +64,33 @@ import '../../../../database/isar_models/track.dart' as model;
 
 extension PlayerControllerExtensions on PlayerController {
   bool get hasNextEpisode {
-    final index = episodeList
-        .indexWhere((e) => e.isSameEpisode(currentEpisode.value));
+    final index =
+        episodeList.indexWhere((e) => e.isSameEpisode(currentEpisode.value));
     return index != -1 && index < episodeList.length - 1;
   }
 
   bool get hasPreviousEpisode {
-    final index = episodeList
-        .indexWhere((e) => e.isSameEpisode(currentEpisode.value));
+    final index =
+        episodeList.indexWhere((e) => e.isSameEpisode(currentEpisode.value));
     return index > 0;
   }
 
   Episode? get nextEpisode {
-    final index = episodeList
-        .indexWhere((e) => e.isSameEpisode(currentEpisode.value));
+    final index =
+        episodeList.indexWhere((e) => e.isSameEpisode(currentEpisode.value));
     if (index == -1 || index >= episodeList.length - 1) return null;
     return episodeList[index + 1];
   }
 
   Episode? get previousEpisode {
-    final index = episodeList
-        .indexWhere((e) => e.isSameEpisode(currentEpisode.value));
+    final index =
+        episodeList.indexWhere((e) => e.isSameEpisode(currentEpisode.value));
     if (index <= 0) return null;
     return episodeList[index - 1];
   }
 
-  int get currentEpisodeIndex => episodeList
-      .indexWhere((e) => e.isSameEpisode(currentEpisode.value));
+  int get currentEpisodeIndex =>
+      episodeList.indexWhere((e) => e.isSameEpisode(currentEpisode.value));
 }
 
 class PlayerController extends GetxController with WidgetsBindingObserver {
@@ -228,6 +230,11 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
   final RxList<SubtitleCue> parsedSubtitleCues = <SubtitleCue>[].obs;
   final Rx<bool> isEpisodePaneOpened = false.obs;
   final Rx<bool> isSpeedPaneOpened = false.obs;
+  final Rx<bool> isWatchTogetherPaneOpened = false.obs;
+  final RxBool isTorrentFilesPaneOpened = false.obs;
+  final RxBool isTorrentStream = false.obs;
+  final Rx<TorrentInfo?> currentTorrentInfo = Rx<TorrentInfo?>(null);
+  final Rx<TorrentFileStat?> currentTorrentFile = Rx<TorrentFileStat?>(null);
   final RxBool canGoForward = false.obs;
   final RxBool canGoBackward = false.obs;
   final RxDouble volume = 0.0.obs;
@@ -239,9 +246,12 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
   final RxBool showShaderOsd = false.obs;
   Timer? _shaderOsdTimer;
   final Rx<Duration> subtitleDelay = Duration.zero.obs;
+  final Rx<Duration> audioDelay = Duration.zero.obs;
   RxMap<String, int> customSettings = <String, int>{}.obs;
   bool _hasTrackedInitialOnline = false;
+  bool _hasTrackedCompletedOnline = false;
   bool _hasTrackedInitialLocal = false;
+  Timer? _rpcSeekDebounceTimer;
   bool _hasAutoSelectedPreferredSub = false;
   aniskip.EpisodeSkipTimes? skipTimes;
   final isOPSkippedOnce = false.obs;
@@ -387,7 +397,8 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _initDatabaseVars();
     _initOrientations();
-    selectedAudioChannelLayout.value = PlayerKeys.audioChannelLayout.get<String>('auto');
+    selectedAudioChannelLayout.value =
+        PlayerKeys.audioChannelLayout.get<String>('auto');
     _activeUseLibass = PlayerKeys.useLibass.get<bool>(false);
     _initializePlayer();
     _updateRpc();
@@ -437,7 +448,7 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
 
     if (decodedConfig.isEmpty) {
       final Map<String, dynamic> defaultConfig = {
-        'leftButtonIds': ['playlist'],
+        'leftButtonIds': ['playlist', 'torrent'],
         'rightButtonIds': [
           'shaders',
           'source',
@@ -453,6 +464,7 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
         'hiddenButtonIds': [],
         'buttonConfigs': {
           'playlist': {'visible': true},
+          'torrent': {'visible': true},
           'shaders': {'visible': true},
           'source': {'visible': true},
           'tracks': {'visible': true},
@@ -471,9 +483,9 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
       final rightIds =
           (decodedConfig['rightButtonIds'] as List<dynamic>?)?.cast<String>() ??
               [];
-      final hiddenIds =
-          (decodedConfig['hiddenButtonIds'] as List<dynamic>?)?.cast<String>() ??
-              [];
+      final hiddenIds = (decodedConfig['hiddenButtonIds'] as List<dynamic>?)
+              ?.cast<String>() ??
+          [];
       final leftIds =
           (decodedConfig['leftButtonIds'] as List<dynamic>?)?.cast<String>() ??
               [];
@@ -509,6 +521,20 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
 
       if (!buttonConfigs.containsKey('audio')) {
         buttonConfigs['audio'] = {'visible': true};
+        decodedConfig['buttonConfigs'] = buttonConfigs;
+        updated = true;
+      }
+
+      if (!rightIds.contains('torrent') &&
+          !hiddenIds.contains('torrent') &&
+          !leftIds.contains('torrent')) {
+        leftIds.add('torrent');
+        decodedConfig['leftButtonIds'] = leftIds;
+        updated = true;
+      }
+
+      if (!buttonConfigs.containsKey('torrent')) {
+        buttonConfigs['torrent'] = {'visible': true};
         decodedConfig['buttonConfigs'] = buttonConfigs;
         updated = true;
       }
@@ -582,8 +608,11 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
       final epTitle = currentEpisode.value.title ?? '';
       final epNum = currentEpisode.value.number;
       final showName = itemName ?? anilistData.title;
-      final title = epTitle.isNotEmpty ? 'Ep $epNum: $epTitle' : 'Episode $epNum';
-      final artworkUrl = isOffline.value ? 'https://raw.githubusercontent.com/RyanYuuki/AnymeX/refs/heads/main/assets/images/logo.png' : (anilistData.cover ?? anilistData.poster);
+      final title =
+          epTitle.isNotEmpty ? 'Ep $epNum: $epTitle' : 'Episode $epNum';
+      final artworkUrl = isOffline.value
+          ? 'https://raw.githubusercontent.com/RyanYuuki/AnymeX/refs/heads/main/assets/images/logo.png'
+          : (anilistData.cover ?? anilistData.poster);
 
       await FlutterMediaSessionPlatform.instance.updateMetadata(
         MediaMetadata(
@@ -599,7 +628,8 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _updateMediaSessionState(bool playing, {Duration? position}) async {
+  Future<void> _updateMediaSessionState(bool playing,
+      {Duration? position}) async {
     if (!_isMediaSessionActive) return;
     try {
       await FlutterMediaSessionPlatform.instance.updatePlaybackState(
@@ -1071,35 +1101,36 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
     } catch (_) {}
 
     if (isTorrentUrl(url)) {
-      final addonManager = Get.isRegistered<AddonManager>()
-          ? Get.find<AddonManager>()
-          : Get.put(AddonManager());
-      final torrServer = addonManager.get<TorrServerAddon>();
-      final isInstalled = await torrServer.isInstalled();
-      if (!isInstalled) {
-        snackBar('Torrent Add-on is not installed. Please install it from Add-ons.');
-        return;
-      }
-
       _isTorrentBuffering = true;
       isBuffering.value = true;
       try {
-        Logger.i('Torrent URL detected from extension, resolving stream via TorrServer...');
+        Logger.i(
+            'Torrent URL detected from extension, resolving stream via TorrServer...');
         final episodeNumStr = episodeNum.toString();
-        final streamUrl = await torrServer.startStream(
+        final streamUrl = await TorrentService.instance.startStream(
           url: url,
           title: anilistData.title,
           episode: episodeNumStr,
         );
         url = streamUrl;
+        isTorrentStream.value = true;
+        currentTorrentInfo.value = TorrentService.instance.activeTorrent;
+        currentTorrentFile.value = TorrentService.instance.activeFile;
         Logger.i('Torrent stream resolved: $url');
       } catch (e) {
         _isTorrentBuffering = false;
         isBuffering.value = false;
+        isTorrentStream.value = false;
+        currentTorrentInfo.value = null;
+        currentTorrentFile.value = null;
         Logger.e('Failed to resolve torrent stream: $e');
         snackBar('Failed to start torrent stream: $e');
         return;
       }
+    } else {
+      isTorrentStream.value = false;
+      currentTorrentInfo.value = null;
+      currentTorrentFile.value = null;
     }
 
     await _basePlayer.open(url, headers: headers, startPosition: startPosition);
@@ -1120,9 +1151,13 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
       malId = anilistData.id;
     } else if (malId.isEmpty || malId == '0') {
       final aniId = anilistData.id;
-      if (aniId.isNotEmpty && aniId != '0' && serviceType.isAL && int.tryParse(aniId) != null) {
+      if (aniId.isNotEmpty &&
+          aniId != '0' &&
+          serviceType.isAL &&
+          int.tryParse(aniId) != null) {
         try {
-          final mappedId = await MediaSyncer.getMappedAnimeId(aniId, MappingType.anilist);
+          final mappedId =
+              await MediaSyncer.getMappedAnimeId(aniId, MappingType.anilist);
           if (mappedId != null && mappedId.isNotEmpty) {
             malId = mappedId;
             anilistData.idMal = mappedId;
@@ -1259,7 +1294,10 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
         isBuffering.value = _basePlayer.state.isBuffering;
       }
 
-      if (_shouldMarkAsCompleted && !isOffline.value) {
+      if (_shouldMarkAsCompleted &&
+          !_hasTrackedCompletedOnline &&
+          !isOffline.value) {
+        _hasTrackedCompletedOnline = true;
         _trackOnline(true);
       }
 
@@ -1334,13 +1372,15 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
           .toList();
 
       if (isOffline.value) {
-        if (embeddedSubs.value.isEmpty) {
-          final offlineTracks = externalSubs.value
-              .map((s) => SubtitleTrack.uri(s.file ?? '',
-                  title: s.label, language: s.label))
-              .toList();
-          subs.addAll(offlineTracks);
-          embeddedSubs.value = subs;
+        final existingIds = embeddedSubs.value.map((t) => t.id).toSet();
+        final newTracks = <SubtitleTrack>[];
+        for (final track in subs) {
+          if (!existingIds.contains(track.id)) {
+            newTracks.add(track);
+          }
+        }
+        if (newTracks.isNotEmpty) {
+          embeddedSubs.value = [...embeddedSubs.value, ...newTracks];
         }
       } else {
         embeddedSubs.value = subs;
@@ -1386,7 +1426,8 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
       }
 
       subtitleTranslateDebounce?.cancel();
-      subtitleTranslateDebounce = Timer(const Duration(milliseconds: 800), () async {
+      subtitleTranslateDebounce =
+          Timer(const Duration(milliseconds: 800), () async {
         final sanitizedLines = e
             .map((line) => line
                 .replaceAll(_htmlRx, '')
@@ -1460,73 +1501,94 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
     final videoPath = selectedVideo.value?.url ?? offlineVideoPath;
     if (videoPath == null) return;
 
+    List<model.Track> foundTracks = [];
+
     if (selectedVideo.value?.subtitles != null &&
         selectedVideo.value!.subtitles!.isNotEmpty) {
-      final validSubs = selectedVideo.value!.subtitles!
-          .where((s) => s.file != null && !s.file!.startsWith('http'))
-          .toList();
-
-      if (validSubs.isNotEmpty) {
-        for (var sub in validSubs) {
-          if (!sub.file!.startsWith('file://')) {
-            sub.file = Uri.file(sub.file!).toString();
+      for (final s in selectedVideo.value!.subtitles!) {
+        if (s.file == null || s.file!.isEmpty) continue;
+        final cleanPath = s.file!.startsWith('file://')
+            ? s.file!.replaceFirst('file://', '')
+            : s.file!;
+        if (File(cleanPath).existsSync()) {
+          foundTracks.add(model.Track(
+            file: Uri.file(cleanPath).toString(),
+            label: s.label,
+          ));
+        } else {
+          final parent = File(cleanPath).parent;
+          if (parent.existsSync()) {
+            final baseName = p.basenameWithoutExtension(cleanPath);
+            final matchFile = parent
+                .listSync()
+                .whereType<File>()
+                .toList()
+                .firstWhereOrNull(
+                    (f) => p.basenameWithoutExtension(f.path) == baseName);
+            if (matchFile != null) {
+              foundTracks.add(model.Track(
+                file: Uri.file(matchFile.path).toString(),
+                label: s.label,
+              ));
+            }
           }
         }
-        externalSubs.value = validSubs;
-
-        final subtitleTracks = validSubs
-            .map((s) => SubtitleTrack.uri(s.file ?? '',
-                title: s.label, language: s.label))
-            .toList();
-
-        embeddedSubs.update((val) {
-          val?.addAll(subtitleTracks);
-        });
-        return;
       }
     }
 
-    try {
-      final videoFile = File(videoPath);
-      final parentDir = videoFile.parent;
-      final dirs = await parentDir.list().whereType<Directory>().toList();
-      final expectedSubsDirName = 'Episode_${currentEpisode.value.number}_subs';
-      final subsDir = dirs
-          .firstWhereOrNull((d) => p.basename(d.path) == expectedSubsDirName);
+    if (foundTracks.isEmpty) {
+      try {
+        final videoFile = File(videoPath);
+        final parentDir = videoFile.parent;
+        final dirs = await parentDir.list().whereType<Directory>().toList();
+        final expectedSubsDirName =
+            'Episode_${currentEpisode.value.number}_subs';
+        final subsDir = dirs
+            .firstWhereOrNull((d) => p.basename(d.path) == expectedSubsDirName);
 
-      if (subsDir != null && await subsDir.exists()) {
-        final files = await subsDir.list().toList();
-        final subFiles = files.whereType<File>().where((f) {
-          final ext = p.extension(f.path).toLowerCase();
-          return ext == '.vtt' ||
-              ext == '.srt' ||
-              ext == '.ass' ||
-              ext == '.ssa';
-        }).toList();
+        if (subsDir != null && await subsDir.exists()) {
+          final files = await subsDir.list().toList();
+          final subFiles = files.whereType<File>().where((f) {
+            final ext = p.extension(f.path).toLowerCase();
+            return ext == '.vtt' ||
+                ext == '.srt' ||
+                ext == '.ass' ||
+                ext == '.ssa';
+          }).toList();
 
-        final tracks = subFiles.map((f) {
-          final label = p.basenameWithoutExtension(f.path);
-          return model.Track(
-            file: Uri.file(f.path).toString(),
-            label: label,
-          );
-        }).toList();
-
-        externalSubs.update((val) {
-          val?.addAll(tracks);
-        });
-
-        final subtitleTracks = tracks
-            .map((s) => SubtitleTrack.uri(s.file ?? '',
-                title: s.label, language: s.label))
-            .toList();
-
-        embeddedSubs.update((val) {
-          val?.addAll(subtitleTracks);
-        });
+          foundTracks = subFiles.map((f) {
+            final label = p.basenameWithoutExtension(f.path);
+            return model.Track(
+              file: Uri.file(f.path).toString(),
+              label: label,
+            );
+          }).toList();
+        }
+      } catch (e) {
+        debugPrint('Error loading local subtitles: $e');
       }
-    } catch (e) {
-      debugPrint('Error loading local subtitles: $e');
+    }
+
+    if (foundTracks.isNotEmpty) {
+      externalSubs.value = foundTracks;
+      final subtitleTracks = foundTracks
+          .map((s) => SubtitleTrack.uri(s.file ?? '',
+              title: s.label, language: s.label))
+          .toList();
+
+      embeddedSubs.value = subtitleTracks;
+
+      if (selectedSubsTrack.value == null) {
+        final preferredLang = playerSettings.preferredSubtitleLanguage;
+        final match = preferredLang != 'none'
+            ? subtitleTracks.firstWhereOrNull((t) => _matchesPreferredLanguage(
+                '${t.language ?? ''} ${t.title ?? ''}', preferredLang))
+            : null;
+        final chosenTrack = match ?? subtitleTracks.firstOrNull;
+        if (chosenTrack != null) {
+          setSubtitleTrack(chosenTrack);
+        }
+      }
     }
   }
 
@@ -1561,7 +1623,9 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
             !isTracksPaneOpened.value &&
             !isAudioPaneOpened.value &&
             !isSyncSubsPaneOpened.value &&
-            !isEpisodePaneOpened.value) {
+            !isEpisodePaneOpened.value &&
+            !isTorrentFilesPaneOpened.value &&
+            !isWatchTogetherPaneOpened.value) {
           showControls.value = false;
         }
       });
@@ -1618,6 +1682,11 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
     _basePlayer.setSubtitleDelay(delay);
   }
 
+  void setAudioDelay(Duration delay) {
+    audioDelay.value = delay;
+    _basePlayer.setAudioDelay(delay);
+  }
+
   Future<void> fetchEpisode(Episode episode, {Duration? savedPosition}) async {
     if (isOffline.value) {
       // Support local file switching for offline episode list
@@ -1636,7 +1705,10 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
       isAudioPaneOpened.value = false;
       isSyncSubsPaneOpened.value = false;
       isSpeedPaneOpened.value = false;
+      isWatchTogetherPaneOpened.value = false;
+      isTorrentFilesPaneOpened.value = false;
       currentEpisode.value = episode;
+      _hasTrackedCompletedOnline = false;
       final stamp = DynamicKeys.offlineVideoProgress.get<int?>(videoPath, null);
       await _basePlayer.open(
         videoPath,
@@ -1644,18 +1716,19 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
       );
       await _basePlayer.setRate(_sessionSpeed);
       // Update the selected video and offline path tracking
-      final offlineVideo = episode.videoTracks?.firstWhereOrNull((v) => v.url == videoPath) ??
-          model.Video(
-            url: videoPath,
-            quality: 'Offline',
-            originalUrl: videoPath,
-            headerKeys: [],
-            headerValues: [],
-            subtitles: episode.videoTracks?.firstOrNull?.subtitles,
-          );
+      final offlineVideo =
+          episode.videoTracks?.firstWhereOrNull((v) => v.url == videoPath) ??
+              model.Video(
+                url: videoPath,
+                quality: 'Offline',
+                originalUrl: videoPath,
+                headerKeys: [],
+                headerValues: [],
+                subtitles: episode.videoTracks?.firstOrNull?.subtitles,
+              );
       episodeTracks.value = [offlineVideo];
       selectedVideo.value = offlineVideo;
-      
+
       _loadLocalSubtitles();
       applySavedProfile();
       return;
@@ -1682,6 +1755,7 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
       await _basePlayer.stop();
       setExternalSub(null);
       currentEpisode.value = episode;
+      _hasTrackedCompletedOnline = false;
       _hasTrackedInitialLocal = false;
       _hasTrackedInitialOnline = false;
       _hasAutoSelectedPreferredSub = false;
@@ -1934,40 +2008,65 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
     }
 
     if (isTorrentUrl(url)) {
-      final addonManager = Get.isRegistered<AddonManager>()
-          ? Get.find<AddonManager>()
-          : Get.put(AddonManager());
-      final torrServer = addonManager.get<TorrServerAddon>();
-      final isInstalled = await torrServer.isInstalled();
-      if (!isInstalled) {
-        snackBar('Torrent Add-on is not installed. Please install it from Add-ons.');
-        return;
-      }
-
       _isTorrentBuffering = true;
       isBuffering.value = true;
       try {
-        Logger.i('Torrent URL detected (switch), resolving stream via TorrServer...');
+        Logger.i(
+            'Torrent URL detected (switch), resolving stream via TorrServer...');
         final episodeNum = currentEpisode.value.number;
-        final streamUrl = await torrServer.startStream(
+        final streamUrl = await TorrentService.instance.startStream(
           url: url,
           title: anilistData.title,
           episode: episodeNum.toString(),
         );
         url = streamUrl;
+        isTorrentStream.value = true;
+        currentTorrentInfo.value = TorrentService.instance.activeTorrent;
+        currentTorrentFile.value = TorrentService.instance.activeFile;
         Logger.i('Torrent stream resolved: $url');
       } catch (e) {
         _isTorrentBuffering = false;
         isBuffering.value = false;
+        isTorrentStream.value = false;
+        currentTorrentInfo.value = null;
+        currentTorrentFile.value = null;
         Logger.e('Failed to resolve torrent stream: $e');
         snackBar('Failed to start torrent stream: $e');
         return;
       }
+    } else {
+      isTorrentStream.value = false;
+      currentTorrentInfo.value = null;
+      currentTorrentFile.value = null;
     }
 
     await _basePlayer.open(url, headers: headers, startPosition: startPosition);
     await _basePlayer.setRate(_sessionSpeed);
     _autoSelectAudioTrack();
+  }
+
+  Future<void> switchTorrentFile(TorrentFileStat file) async {
+    if (currentTorrentFile.value?.id == file.id) return;
+    try {
+      _isTorrentBuffering = true;
+      isBuffering.value = true;
+      final newUrl = TorrentService.instance.switchStreamFile(file.id);
+      currentTorrentFile.value = file;
+      if (_basePlayer is MediaKitPlayer) {
+        await _basePlayer.open("");
+      }
+      await _basePlayer.open(newUrl, startPosition: Duration.zero);
+      await _basePlayer.setRate(_sessionSpeed);
+      _autoSelectAudioTrack();
+      AnymeXToast.show(
+        message: 'Playing ${p.basename(file.path)}',
+      );
+    } catch (e) {
+      _isTorrentBuffering = false;
+      isBuffering.value = false;
+      Logger.e('Failed to switch torrent file: $e');
+      snackBar('Failed to switch torrent file: $e');
+    }
   }
 
   Future<void> delete() async {
@@ -1985,6 +2084,7 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
     await _basePlayer.pause();
     _subSyncWorker?.dispose();
     _seekDebounce?.cancel();
+    _rpcSeekDebounceTimer?.cancel();
     _brightnessTimer?.cancel();
     _volumeTimer?.cancel();
     _controlsTimer?.cancel();
@@ -2019,10 +2119,12 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
     await _basePlayer.dispose();
 
     try {
-      if (Get.isRegistered<AddonManager>()) {
-        await Get.find<AddonManager>().get<TorrServerAddon>().stopStream();
-      }
+      unawaited(TorrentService.instance.stopStream());
     } catch (_) {}
+    isTorrentFilesPaneOpened.value = false;
+    isTorrentStream.value = false;
+    currentTorrentInfo.value = null;
+    currentTorrentFile.value = null;
 
     try {
       if (Platform.isAndroid || Platform.isIOS) {
@@ -2050,6 +2152,22 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
     _seekDebounce?.cancel();
     _seekDebounce = Timer(const Duration(milliseconds: 100), () {
       _seekTo(pos);
+    });
+
+    _rpcSeekDebounceTimer?.cancel();
+    _rpcSeekDebounceTimer = Timer(const Duration(seconds: 10), () {
+      if (isClosed || isOffline.value) return;
+      currentEpisode.value.timeStampInMilliseconds =
+          currentPosition.value.inMilliseconds;
+      if (isPlaying.value) {
+        _updateRpc();
+      } else {
+        DiscordRPCController.instance.updateAnimePresencePaused(
+          anime: anilistData,
+          episode: currentEpisode.value,
+          totalEpisodes: episodeList.length.toString(),
+        );
+      }
     });
   }
 
@@ -2302,10 +2420,36 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
 
     selectedExternalSub.value = track;
     final subtitleUrl = _resolveSubtitleUrl(track.file!);
-    final subtitleTrack = SubtitleTrack.uri(
-      subtitleUrl,
-      title: track.label,
-    );
+    SubtitleTrack subtitleTrack;
+    final cleanPath = subtitleUrl.startsWith('file://')
+        ? subtitleUrl.replaceFirst('file://', '')
+        : subtitleUrl;
+    final localFile = File(cleanPath);
+    if (localFile.existsSync()) {
+      try {
+        final bytes = localFile.readAsBytesSync();
+        String content;
+        try {
+          content = utf8.decode(bytes);
+        } catch (_) {
+          content = latin1.decode(bytes);
+        }
+        subtitleTrack = SubtitleTrack.data(
+          content,
+          title: track.label,
+        );
+      } catch (_) {
+        subtitleTrack = SubtitleTrack.uri(
+          subtitleUrl,
+          title: track.label,
+        );
+      }
+    } else {
+      subtitleTrack = SubtitleTrack.uri(
+        subtitleUrl,
+        title: track.label,
+      );
+    }
 
     selectedSubsTrack.value = subtitleTrack;
     _applySubtitleTrack(subtitleTrack);
@@ -2419,7 +2563,6 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
         startPosition: _basePlayer.state.position);
   }
 
-
   Future<void> loadSubtitleCuesFromUrl(String url) async {
     try {
       parsedSubtitleCues.clear();
@@ -2431,16 +2574,17 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
         final client = HttpClient();
         client.connectionTimeout = const Duration(seconds: 10);
         final request = await client.getUrl(uri);
-        
-        request.headers.add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-        
+
+        request.headers.add('User-Agent',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+
         final videoHeaders = selectedVideo.value?.headers;
         if (videoHeaders != null) {
           videoHeaders.forEach((key, val) {
             request.headers.add(key, val);
           });
         }
-        
+
         final response = await request.close();
         content = await response.transform(utf8.decoder).join();
         client.close();
@@ -2677,6 +2821,8 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
     isAudioPaneOpened.value = false;
     isSyncSubsPaneOpened.value = false;
     isSpeedPaneOpened.value = false;
+    isWatchTogetherPaneOpened.value = false;
+    isTorrentFilesPaneOpened.value = false;
     resetListeners();
     fetchEpisode(episode);
     _updateMediaSessionMetadata();
@@ -2802,9 +2948,14 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
             if (!await snapshotsDir.exists()) {
               await snapshotsDir.create(recursive: true);
             }
-            final cleanTitle = anilistData.title.replaceAll(RegExp(r'[^\w\s\-]'), '').replaceAll(RegExp(r'\s+'), '_');
-            final cleanEpNumber = episode.number.replaceAll(RegExp(r'[^\w\s\-]'), '').replaceAll(RegExp(r'\s+'), '_');
-            final file = File('${snapshotsDir.path}/${cleanTitle}_$cleanEpNumber.png');
+            final cleanTitle = anilistData.title
+                .replaceAll(RegExp(r'[^\w\s\-]'), '')
+                .replaceAll(RegExp(r'\s+'), '_');
+            final cleanEpNumber = episode.number
+                .replaceAll(RegExp(r'[^\w\s\-]'), '')
+                .replaceAll(RegExp(r'\s+'), '_');
+            final file =
+                File('${snapshotsDir.path}/${cleanTitle}_$cleanEpNumber.png');
             await file.writeAsBytes(screenshot);
             thumbnailPath = file.path;
           } catch (_) {
@@ -2857,8 +3008,7 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
       return;
     }
 
-    final isExtension =
-        anilistData.serviceType == ServicesType.extensions;
+    final isExtension = anilistData.serviceType == ServicesType.extensions;
     if (isExtension) {
       try {
         if (!Get.isRegistered<TrackBindingController>()) return;
@@ -2915,12 +3065,18 @@ class PlayerController extends GetxController with WidgetsBindingObserver {
       final isFinished = hasCrossedLimit &&
           (statusUpper == 'COMPLETED' || statusUpper == 'FINISHED') &&
           !hasNextEpisode;
+      final currentListStatus =
+          (service.currentMedia.value.watchingStatus ?? anilistData.status)
+              .toUpperCase();
+      final isRepeating = currentListStatus == 'REPEATING';
+      final newStatus =
+          isFinished ? 'COMPLETED' : (isRepeating ? 'REPEATING' : 'CURRENT');
       await service.updateListEntry(UpdateListEntryParams(
           listId: anilistData.id,
           progress: newProgress,
           isAnime: true,
           season: detectedSeason,
-          status: isFinished ? 'COMPLETED' : 'CURRENT',
+          status: newStatus,
           syncIds: [anilistData.idMal]));
 
       service.setCurrentMedia(anilistData.id.toString());

@@ -1,6 +1,5 @@
 import 'dart:math' as math;
 
-import 'package:anymex/controllers/source/source_controller.dart';
 import 'package:anymex/database/isar_models/chapter.dart';
 import 'package:anymex/screens/manga/controller/reader_controller.dart';
 import 'package:anymex/widgets/subsampling_scale_image_view/subsampling_image_provider.dart';
@@ -366,7 +365,6 @@ class _ContinuousReaderViewState extends State<ContinuousReaderView>
   Widget _buildImage(BuildContext context, PageUrl page, int index, Chapter? chapter) {
     return Obx(() {
       final ctrl = widget.controller;
-      final sourceController = Get.find<SourceController>();
 
       int relativePageNum = 1;
       if (chapter != null) {

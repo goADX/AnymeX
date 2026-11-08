@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:anymex/controllers/services/storage/anymex_cache_manager.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -229,11 +230,9 @@ class _AnymeXImageState extends State<AnymeXImage> {
       }
     }
 
-    return RepaintBoundary(
-      child: ClipRRect(
-        borderRadius: widget.borderRadius ?? BorderRadius.circular(widget.radius),
-        child: imageContent,
-      ),
+    return ClipRRect(
+      borderRadius: widget.borderRadius ?? BorderRadius.circular(widget.radius),
+      child: imageContent,
     );
   }
 
@@ -243,21 +242,33 @@ class _AnymeXImageState extends State<AnymeXImage> {
       "Referer": "${url.origin}/",
       "Origin": url.origin,
     } : {};
+    final dpr = PlatformDispatcher.instance.views.isEmpty
+        ? 2.0
+        : PlatformDispatcher.instance.views.first.devicePixelRatio.clamp(1.0, 3.0);
+    final decodeWidth = widget.width != null && widget.width!.isFinite && widget.width! > 0
+        ? (widget.width! * dpr).round()
+        : (widget.height != null && widget.height!.isFinite && widget.height! > 0 ? null : 1440);
+    final decodeHeight = widget.height != null && widget.height!.isFinite && widget.height! > 0
+        ? (widget.height! * dpr).round()
+        : null;
     return CachedNetworkImage(
       cacheManager: AnymeXCacheManager.instance,
       imageUrl: imageUrl,
       httpHeaders: widget.headers ?? headers,
       width: widget.width,
       height: widget.height,
+      memCacheWidth: decodeWidth,
+      memCacheHeight: decodeWidth == null ? decodeHeight : null,
+      filterQuality: FilterQuality.low,
       fit: widget.fit,
       alignment: widget.alignment,
       color: widget.color,
       colorBlendMode: widget.color != null ? BlendMode.color : null,
       placeholder: (_, __) => _placeholder(context),
       fadeInDuration:
-          widget.fadeInDuration ?? const Duration(milliseconds: 500),
+          widget.fadeInDuration ?? Duration.zero,
       fadeOutDuration:
-          widget.fadeOutDuration ?? const Duration(milliseconds: 300),
+          widget.fadeOutDuration ?? Duration.zero,
       errorWidget: (_, __, ___) {
         if (widget.errorImage != null && widget.errorImage!.isNotEmpty) {
           return _errorImage(widget.errorImage!);
@@ -298,11 +309,23 @@ class _AnymeXImageState extends State<AnymeXImage> {
     }
 
     if (isNetworkImageUrl(imageUrl)) {
+      final dpr = PlatformDispatcher.instance.views.isEmpty
+          ? 2.0
+          : PlatformDispatcher.instance.views.first.devicePixelRatio.clamp(1.0, 3.0);
+      final decodeWidth = widget.width != null && widget.width!.isFinite && widget.width! > 0
+          ? (widget.width! * dpr).round()
+          : null;
+      final decodeHeight = widget.height != null && widget.height!.isFinite && widget.height! > 0
+          ? (widget.height! * dpr).round()
+          : null;
       return CachedNetworkImage(
         cacheManager: AnymeXCacheManager.instance,
         imageUrl: imageUrl,
         width: widget.width,
         height: widget.height,
+        memCacheWidth: decodeWidth,
+        memCacheHeight: decodeWidth == null ? decodeHeight : null,
+        filterQuality: FilterQuality.low,
         fit: widget.fit,
         placeholder: (_, __) => _placeholder(context),
         fadeInDuration:
@@ -368,9 +391,7 @@ class _AnymeXImageState extends State<AnymeXImage> {
     return Container(
       width: widget.width,
       height: widget.height,
-      alignment: Alignment.center,
       color: Theme.of(context).colorScheme.surfaceContainerHighest.opaque(0.2),
-      child: const CircularProgressIndicator(strokeWidth: 2),
     );
   }
 

@@ -1,7 +1,9 @@
 import 'package:anymex/utils/theme_extensions.dart';
+import 'package:anymex/widgets/animation/widget_animations.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_expansion_tile.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_text.dart';
 import 'package:anymex/widgets/anymex_widgets/anymex_tile.dart';
+import 'package:anymex/widgets/common/custom_tiles.dart';
 import 'package:flutter/material.dart';
 
 class AnymeXSectionBuilder extends StatelessWidget {
@@ -155,11 +157,19 @@ class AnymeXSectionBuilder extends StatelessWidget {
                     width: 0.8,
                   ),
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: formattedChildren,
-            ),
-          ),
+            child: (title != null && title!.isNotEmpty)
+                ? ExpansionSectionScope(
+                    sectionTitle: title!,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: formattedChildren,
+                    ),
+                  )
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: formattedChildren,
+                  ),
+          ).animateSection(),
         ],
       ),
     );

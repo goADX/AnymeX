@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -86,7 +87,10 @@ class MediaKitPlayer extends base.BasePlayer {
 
     _player = Player(
       configuration: PlayerConfiguration(
-          bufferSize: bufferSize, libass: config.useLibass, vo: resolvedVo),
+        bufferSize: bufferSize,
+        libass: config.useLibass,
+        vo: resolvedVo,
+      ),
     );
 
     _videoController = VideoController(
@@ -135,6 +139,7 @@ class MediaKitPlayer extends base.BasePlayer {
 
     await PlayerCoreVisualSettings.applyMpvCoreSettings(_player);
     await PlayerCoreVisualSettings.applyMpvVisualSettings(_player);
+    await PlayerCoreVisualSettings.applyMpvConf(_player);
   }
 
   void _setupListeners() {
@@ -332,7 +337,42 @@ class MediaKitPlayer extends base.BasePlayer {
       return;
     }
 
+    if (track.data != null && track.data!.isNotEmpty) {
+      await _player.setSubtitleTrack(
+        SubtitleTrack.data(
+          track.data!,
+          title: track.title,
+          language: track.language,
+        ),
+      );
+      return;
+    }
+
     if (track.url != null) {
+      final rawPath = track.url!.startsWith('file://')
+          ? track.url!.replaceFirst('file://', '')
+          : track.url!;
+      final localFile = File(rawPath);
+      if (localFile.existsSync()) {
+        try {
+          final bytes = await localFile.readAsBytes();
+          String content;
+          try {
+            content = utf8.decode(bytes);
+          } catch (_) {
+            content = latin1.decode(bytes);
+          }
+          await _player.setSubtitleTrack(
+            SubtitleTrack.data(
+              content,
+              title: track.title,
+              language: track.language,
+            ),
+          );
+          return;
+        } catch (_) {}
+      }
+
       await _player.setSubtitleTrack(
         SubtitleTrack.uri(
           track.url!,
@@ -354,6 +394,17 @@ class MediaKitPlayer extends base.BasePlayer {
   Future<void> setSubtitleDelay(Duration delay) async {
     final seconds = delay.inMicroseconds / 1000000.0;
     (_player.platform as dynamic).setProperty('sub-delay', seconds.toString());
+  }
+
+  @override
+  Future<void> setAudioDelay(Duration delay) async {
+    final seconds = delay.inMicroseconds / 1000000.0;
+    try {
+      (_player.platform as dynamic)
+          .setProperty('audio-delay', seconds.toString());
+    } catch (e) {
+      debugPrint('Error setting audio-delay: $e');
+    }
   }
 
   @override
